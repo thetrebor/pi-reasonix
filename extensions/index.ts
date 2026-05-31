@@ -85,9 +85,21 @@ export default function (pi: ExtensionAPI) {
   (pi.on as (...args: unknown[]) => void)(
     "model_select",
     (event: Record<string, unknown>) => {
-      // ModelSelectEvent.model is a Model<any> object with .id or .name
-      // We try multiple extraction paths to handle different shapes
+      // Debug: log the full event shape to understand the Model<any> object
       const modelObj = event?.model;
+      console.log("[pi-reasonix] model_select event received");
+      console.log("[pi-reasonix]   model type:", typeof modelObj);
+      if (typeof modelObj === "object" && modelObj) {
+        const obj = modelObj as Record<string, unknown>;
+        console.log("[pi-reasonix]   model keys:", Object.keys(obj));
+        console.log("[pi-reasonix]   model.id:", obj.id);
+        console.log("[pi-reasonix]   model.name:", obj.name);
+        console.log("[pi-reasonix]   source:", event.source);
+      } else if (typeof modelObj === "string") {
+        console.log("[pi-reasonix]   model string:", modelObj);
+      }
+
+      // ModelSelectEvent.model is a Model<any> object with .id or .name
       let modelId = "";
       if (typeof modelObj === "string") {
         modelId = modelObj;
@@ -99,9 +111,11 @@ export default function (pi: ExtensionAPI) {
       if (modelId && isDeepSeekModelId(modelId)) {
         isDeepSeekSession = true;
         currentModel = modelId;
+        console.log("[pi-reasonix] ✅ DeepSeek detected via model_select:", modelId);
       } else if (modelId) {
         isDeepSeekSession = false;
         currentModel = modelId;
+        console.log("[pi-reasonix] Non-DeepSeek model:", modelId);
       }
     },
   );
