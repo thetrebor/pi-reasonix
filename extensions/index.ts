@@ -207,6 +207,37 @@ export default async function (pi: ExtensionAPI) {
   });
 
   /* ------------------------------------------------------------------ */
+  /*  TEMP DEBUG: message_end — inspect AgentMessage for usage/cache data */
+  /* ------------------------------------------------------------------ */
+
+  /* ------------------------------------------------------------------ */
+  /*  TEMP DEBUG: message_end — inspect AgentMessage for usage/cache data */
+  /* ------------------------------------------------------------------ */
+
+  (pi.on as (...args: unknown[]) => void)(
+    "message_end",
+    (event: Record<string, unknown>) => {
+      if (!isDeepSeekSession) return;
+      const msg = event?.message as Record<string, unknown> | undefined;
+      if (!msg) {
+        console.log("[pi-reasonix:debug] message_end: no message object");
+        return;
+      }
+      // Log the keys present on the message
+      const keys = Object.keys(msg);
+      console.log("[pi-reasonix:debug] message_end keys:", JSON.stringify(keys));
+
+      // Log any fields that look like they might contain usage/cache data
+      const suspectFields = ["usage", "raw", "metadata", "response", "finishReason", "tokenUsage", "cacheTokens", "promptTokens", "completionTokens"];
+      for (const field of suspectFields) {
+        if (field in msg) {
+          console.log(`[pi-reasonix:debug] message has "${field}":`, JSON.stringify(msg[field]).slice(0, 500));
+        }
+      }
+    },
+  );
+
+  /* ------------------------------------------------------------------ */
   /*  turn_end — tracking (compaction happens in before_provider_request) */
   /* ------------------------------------------------------------------ */
 
