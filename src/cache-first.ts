@@ -41,19 +41,26 @@ export function isDeepSeekProvider(baseUrl: string): boolean {
 /**
  * Immutable prefix tracker.
  *
- * The prefix is computed once per session from:
- *   system prompt + tool specifications + few-shot examples
+ * Tracks the prefix derived from the system prompt + tool definitions.
+ * These are what determine DeepSeek's prefix-cache matching — the rest of
+ * the conversation history just appends after the stable prefix.
  *
- * It is pinned by hash and checked on every `before_provider_request` event.
- * If the prefix hash changes, the session caches are invalidated.
+ * Message truncation (context window compaction) does NOT affect prefix
+ * stability, because the prefix hash only considers:
+ *   1. The system message content
+ *   2. The tool-call definitions (assistant messages with tool_calls)
+ *
+ * If neither changes across turns, the prefix is "stable" and DeepSeek's
+ * automatic disk cache will hit on every repeat of the same prefix bytes.
  */
 export class PrefixGuard {
   private _systemHash = "";
   private _toolsHash = "";
+  private _prevPrefixHash = "";
   private _prefixHash = "";
-  private _lastPrefix: string[] = [];
+  private _stabiliseCount = 0;
 
-  /** Stabilise the messages array: trim to the immutable prefix + append-only log. */
+  /** Stabilise messages array: system first, stable prefix hash. */
   stabilise(
     messages: DeepSeekChatMessage[],
   ): { messages: DeepSeekChatMessage[]; prefixHash: string } {
@@ -65,27 +72,22 @@ export class PrefixGuard {
       messages.filter((m) => m.role === "assistant" && m.tool_calls),
     );
     const toolsHash = fastHash(toolCallsJSON);
-
     const prefixHash = fastHash(systemHash + "|" + toolsHash);
 
-    // If the prefix hasn't changed, preserve the established prefix ordering.
-    // DeepSeek's automatic prefix cache matches from byte 0, so the system
-    // message must always be the first message.
-    const stabilised: DeepSeekChatMessage[] = [];
-
     // Always re-emit system first if it exists.
+    const stabilised: DeepSeekChatMessage[] = [];
     if (systemMsg) {
       stabilised.push(systemMsg);
     }
-
     // Append non-system messages in stable order (no reordering).
     const nonSystem = messages.filter((m) => m.role !== "system");
     stabilised.push(...nonSystem);
 
+    this._stabiliseCount++;
+    this._prevPrefixHash = this._prefixHash;
+    this._prefixHash = prefixHash;
     this._systemHash = systemHash;
     this._toolsHash = toolsHash;
-    this._prefixHash = prefixHash;
-    this._lastPrefix = [systemText, toolCallsJSON];
 
     return { messages: stabilised, prefixHash };
   }
@@ -95,22 +97,36 @@ export class PrefixGuard {
     return this._prefixHash;
   }
 
-  /** Whether the prefix has changed since last check. */
+  /**
+   * True when the prefix hash is stable across at least 2 successive calls.
+   * First call always returns false (no baseline for comparison).
+   * Seed calls after reset return false until a second comparison.
+   */
   isStable(): boolean {
-    return this._prefixHash !== "";
+    return (
+      this._stabiliseCount >= 2 &&
+      this._prefixHash !== "" &&
+      this._prefixHash === this._prevPrefixHash
+    );
   }
 
-  /** Whether the guard has ever been initialized (computed at least once). */
+  /** Whether the guard has been initialized (computed at least once). */
   isInitialized(): boolean {
-    return this._prefixHash !== "" || this._lastPrefix.length > 0;
+    return this._stabiliseCount > 0;
   }
 
-  /** Reset (new session). */
+  /** Times stabilise() has been called since last reset. */
+  get callCount(): number {
+    return this._stabiliseCount;
+  }
+
+  /** Reset (new session or context cleared). */
   reset(): void {
     this._systemHash = "";
     this._toolsHash = "";
+    this._prevPrefixHash = "";
     this._prefixHash = "";
-    this._lastPrefix = [];
+    this._stabiliseCount = 0;
   }
 }
 

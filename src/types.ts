@@ -51,6 +51,8 @@ export interface ReasonixStats {
   stormsSuppressed: number;
   /** Cost control. */
   resultsCompacted: number;
+  /** Conversation truncation events (pi compacted history). */
+  conversationTruncations: number;
   /** Session-level roll-ups. */
   totalTurns: number;
   totalTokens: number;

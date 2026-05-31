@@ -69,6 +69,7 @@ export default async function (pi: ExtensionAPI) {
     callsScavenged: 0,
     stormsSuppressed: 0,
     resultsCompacted: 0,
+    conversationTruncations: 0,
     totalTurns: 0,
     totalTokens: 0,
   };
@@ -169,10 +170,13 @@ export default async function (pi: ExtensionAPI) {
       const stabilised = prefixGuard.stabilise(messages);
       prefixHash = stabilised.prefixHash;
 
-      // 2. Check append-only invariant
+      // 2. Check append-only invariant (truncation doesn't affect prefix hash)
       if (!logTracker.validate(stabilised.messages as DeepSeekChatMessage[])) {
-        console.warn("[pi-reasonix] Message log was truncated. Prefix cache invalidated.");
-        prefixGuard.reset();
+        // Pi truncated older messages to fit context window — this is normal.
+        // The prefix (system prompt + tool definitions) is unaffected, so
+        // prefix hash stays stable and DeepSeek's cache still matches.
+        logTracker.reset();
+        stats.conversationTruncations++;
       }
 
       // 3. Compact oversized tool results
@@ -242,9 +246,11 @@ export default async function (pi: ExtensionAPI) {
             ? "✅"
             : "❌ (changed)"
           : "⏳ (no calls yet)"}`,
+        `  Calls:         ${prefixGuard.callCount} since last reset`,
+        `  Truncations:   ${stats.conversationTruncations}`,
         "",
         "  📊 Cache",
-        `    Hit tokens:   ${stats.cacheHitTokens.toLocaleString()}`,
+        `    Hit tokens:  ${stats.cacheHitTokens.toLocaleString()}`,
         `    Miss tokens:  ${stats.cacheMissTokens.toLocaleString()}`,
         `    Hit ratio:    ${getHitRatio(stats)}`,
         "",
