@@ -78,13 +78,12 @@ export function repairTruncatedJSON(text: string): {
   const openBrackets = (result.match(/\[/g) || []).length;
   const closeBrackets = (result.match(/\]/g) || []).length;
 
-  // Close unclosed braces
-  for (let i = 0; i < openBraces - closeBraces; i++) {
-    result += "}";
-  }
-  // Close unclosed brackets
+  // Close brackets first (innermost), then braces (outermost)
   for (let i = 0; i < openBrackets - closeBrackets; i++) {
     result += "]";
+  }
+  for (let i = 0; i < openBraces - closeBraces; i++) {
+    result += "}";
   }
 
   // Remove trailing commas that would invalidate JSON

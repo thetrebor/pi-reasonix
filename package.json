@@ -23,10 +23,12 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
+    "prepublishOnly": "npm run build && npm run test",
     "test": "node --experimental-vm-modules test/*.test.mjs",
-    "lint": "biome check .",
-    "format": "biome format --write .",
     "check": "npm run build && npm run test"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "pi": {
     "extensions": [
