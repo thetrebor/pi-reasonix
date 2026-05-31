@@ -26,6 +26,9 @@ import type {
 import { PrefixGuard, AppendOnlyLog } from "../src/cache-first.js";
 import { compactToolResults, estimateContextUsage } from "../src/cost-control.js";
 import type { ReasonixStats, DeepSeekChatMessage } from "../src/types.js";
+import { writeFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                             */
@@ -210,30 +213,34 @@ export default async function (pi: ExtensionAPI) {
   /*  TEMP DEBUG: message_end — inspect AgentMessage for usage/cache data */
   /* ------------------------------------------------------------------ */
 
-  /* ------------------------------------------------------------------ */
-  /*  TEMP DEBUG: message_end — inspect AgentMessage for usage/cache data */
-  /* ------------------------------------------------------------------ */
-
+  let _debugCount = 0;
   (pi.on as (...args: unknown[]) => void)(
     "message_end",
     (event: Record<string, unknown>) => {
       if (!isDeepSeekSession) return;
-      const msg = event?.message as Record<string, unknown> | undefined;
-      if (!msg) {
-        console.log("[pi-reasonix:debug] message_end: no message object");
-        return;
-      }
-      // Log the keys present on the message
-      const keys = Object.keys(msg);
-      console.log("[pi-reasonix:debug] message_end keys:", JSON.stringify(keys));
+      _debugCount++;
+      if (_debugCount > 2) return; // only first 2 calls
 
-      // Log any fields that look like they might contain usage/cache data
+      const msg = event?.message as Record<string, unknown> | undefined;
+      if (!msg) return;
+
+      const keys = Object.keys(msg);
+      const usageInfo: Record<string, unknown> = { keys };
+
+      // Grab any suspect fields
       const suspectFields = ["usage", "raw", "metadata", "response", "finishReason", "tokenUsage", "cacheTokens", "promptTokens", "completionTokens"];
       for (const field of suspectFields) {
         if (field in msg) {
-          console.log(`[pi-reasonix:debug] message has "${field}":`, JSON.stringify(msg[field]).slice(0, 500));
+          usageInfo[field] = msg[field];
         }
       }
+
+      const debugDir = join(homedir(), ".sandcastle", "tmp");
+      mkdirSync(debugDir, { recursive: true });
+      writeFileSync(
+        join(debugDir, `pi-reasonix-message-end-debug-${_debugCount}.json`),
+        JSON.stringify(usageInfo, null, 2),
+      );
     },
   );
 
