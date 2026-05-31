@@ -77,6 +77,36 @@ export default function (pi: ExtensionAPI) {
   let currentModel = "";
 
   /* ------------------------------------------------------------------ */
+  /*  model_select — detect DeepSeek model as soon as it's selected       */
+  /* ------------------------------------------------------------------ */
+
+  // model_select fires before model is used — lets us set isDeepSeekSession early.
+  // TypeScript cast is needed because ModelSelectEvent isn't in exported types.
+  (pi.on as (...args: unknown[]) => void)(
+    "model_select",
+    (event: Record<string, unknown>) => {
+      // ModelSelectEvent.model is a Model<any> object with .id or .name
+      // We try multiple extraction paths to handle different shapes
+      const modelObj = event?.model;
+      let modelId = "";
+      if (typeof modelObj === "string") {
+        modelId = modelObj;
+      } else if (modelObj && typeof modelObj === "object") {
+        modelId = (modelObj as Record<string, unknown>).id as string
+          ?? (modelObj as Record<string, unknown>).name as string
+          ?? "";
+      }
+      if (modelId && isDeepSeekModelId(modelId)) {
+        isDeepSeekSession = true;
+        currentModel = modelId;
+      } else if (modelId) {
+        isDeepSeekSession = false;
+        currentModel = modelId;
+      }
+    },
+  );
+
+  /* ------------------------------------------------------------------ */
   /*  before_provider_request — prefix stabilisation                     */
   /* ------------------------------------------------------------------ */
 
@@ -151,11 +181,11 @@ export default function (pi: ExtensionAPI) {
   /* ------------------------------------------------------------------ */
 
   pi.on("session_start", () => {
+    // Don't reset isDeepSeekSession — model_select re-detects on model change.
+    // Resetting here would wipe the detection that happened before the first turn.
     prefixGuard.reset();
     logTracker.reset();
-    isDeepSeekSession = false;
     prefixHash = "";
-    currentModel = "";
   });
 
   /* ------------------------------------------------------------------ */
