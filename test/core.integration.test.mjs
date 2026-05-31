@@ -56,7 +56,7 @@ describe("Extension factory wiring", () => {
   it("registers all lifecycle hooks", async () => {
     const { api, captured } = createMockAPI();
     const ext = (await import("../dist/extensions/index.js")).default;
-    ext(api);
+    await ext(api);
 
     const events = captured
       .filter((c) => c.type === "on")
@@ -71,7 +71,7 @@ describe("Extension factory wiring", () => {
   it("registers the /reasonix-status command", async () => {
     const { api, captured } = createMockAPI();
     const ext = (await import("../dist/extensions/index.js")).default;
-    ext(api);
+    await ext(api);
 
     const cmd = captured.find(
       (c) => c.type === "registerCommand" && c.name === "reasonix-status",
@@ -83,7 +83,7 @@ describe("Extension factory wiring", () => {
   it("handler signatures are compatible with ExtensionAPI types", async () => {
     const { api } = createMockAPI();
     const ext = (await import("../dist/extensions/index.js")).default;
-    assert.doesNotThrow(() => ext(api));
+    await ext(api);
   });
 });
 

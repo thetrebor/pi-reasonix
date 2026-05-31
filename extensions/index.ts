@@ -11,9 +11,10 @@
  * The extension activates automatically when the current model is a
  * DeepSeek model (deepseek-chat, deepseek-reasoner, deepseek-v4, etc.).
  *
- * Install:
- *   pi install /path/to/pi-reasonix
- *   pi install npm:@thetrebor/pi-reasonix
+ * Detection happens at three levels:
+ *   1. Init-time: reads pi's defaultModel from settings.json
+ *   2. model_select: fires when user switches model via /model
+ *   3. before_provider_request: fires before each API call (fallback)
  */
 
 import type {
@@ -53,7 +54,7 @@ function getHitRatio(stats: Pick<ReasonixStats, "cacheHitTokens" | "cacheMissTok
 /*  Extension Factory                                                   */
 /* ------------------------------------------------------------------ */
 
-export default function (pi: ExtensionAPI) {
+export default async function (pi: ExtensionAPI) {
   /* ------------------------------------------------------------------ */
   /*  Session-scoped state                                               */
   /* ------------------------------------------------------------------ */
@@ -77,29 +78,51 @@ export default function (pi: ExtensionAPI) {
   let currentModel = "";
 
   /* ------------------------------------------------------------------ */
-  /*  model_select — detect DeepSeek model as soon as it's selected       */
+  /*  Init-time detection — read pi's defaultModel from settings          */
   /* ------------------------------------------------------------------ */
 
-  // model_select fires before model is used — lets us set isDeepSeekSession early.
-  // TypeScript cast is needed because ModelSelectEvent isn't in exported types.
+  try {
+    const { readFileSync } = await import("node:fs");
+    const { homedir } = await import("node:os");
+    const { join } = await import("node:path");
+    const envDir = process.env.PI_CONFIG_DIR ?? process.env.XDG_CONFIG_HOME ?? "";
+    const settingsPaths = [
+      // PI_CONFIG_DIR overrides the default location
+      envDir ? join(envDir, "settings.json") : "",
+      // Standard pi locations
+      join(homedir(), ".pi", "agent", "settings.json"),
+      join(homedir(), ".config", "pi", "agent", "settings.json"),
+      join(homedir(), ".pi", "settings.json"),
+      join(process.cwd(), ".pi", "settings.json"),
+    ].filter(Boolean);
+
+    for (const sp of settingsPaths) {
+      try {
+        const data = JSON.parse(readFileSync(sp, "utf-8"));
+        const defaultModel = (data as Record<string, unknown>).defaultModel as string ?? "";
+        if (defaultModel && isDeepSeekModelId(defaultModel)) {
+          isDeepSeekSession = true;
+          currentModel = defaultModel;
+          break;
+        }
+      } catch {
+        continue;
+      }
+    }
+  } catch {
+    // Can't read settings — will detect on first API call instead.
+  }
+
+  /* ------------------------------------------------------------------ */
+  /*  model_select — detect DeepSeek when user switches models           */
+  /* ------------------------------------------------------------------ */
+
+  // model_select fires when the user changes model via /model or cycling.
+  // Not fired at extension load time — only on user-initiated changes.
   (pi.on as (...args: unknown[]) => void)(
     "model_select",
     (event: Record<string, unknown>) => {
-      // Debug: log the full event shape to understand the Model<any> object
       const modelObj = event?.model;
-      console.log("[pi-reasonix] model_select event received");
-      console.log("[pi-reasonix]   model type:", typeof modelObj);
-      if (typeof modelObj === "object" && modelObj) {
-        const obj = modelObj as Record<string, unknown>;
-        console.log("[pi-reasonix]   model keys:", Object.keys(obj));
-        console.log("[pi-reasonix]   model.id:", obj.id);
-        console.log("[pi-reasonix]   model.name:", obj.name);
-        console.log("[pi-reasonix]   source:", event.source);
-      } else if (typeof modelObj === "string") {
-        console.log("[pi-reasonix]   model string:", modelObj);
-      }
-
-      // ModelSelectEvent.model is a Model<any> object with .id or .name
       let modelId = "";
       if (typeof modelObj === "string") {
         modelId = modelObj;
@@ -111,11 +134,9 @@ export default function (pi: ExtensionAPI) {
       if (modelId && isDeepSeekModelId(modelId)) {
         isDeepSeekSession = true;
         currentModel = modelId;
-        console.log("[pi-reasonix] ✅ DeepSeek detected via model_select:", modelId);
       } else if (modelId) {
         isDeepSeekSession = false;
         currentModel = modelId;
-        console.log("[pi-reasonix] Non-DeepSeek model:", modelId);
       }
     },
   );
@@ -132,7 +153,7 @@ export default function (pi: ExtensionAPI) {
         | undefined;
       if (!payload) return;
 
-      // Detect DeepSeek by model ID
+      // Detect DeepSeek by model ID (fallback for first API call)
       if (payload.model && isDeepSeekModelId(payload.model)) {
         if (!isDeepSeekSession) {
           isDeepSeekSession = true;
@@ -187,16 +208,16 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("turn_end", (_event: TurnEndEvent) => {
     // Result compaction is handled upstream in before_provider_request.
-    // This hook is reserved for future use (e.g., per-turn cost logging).
+    // Reserved for future use (e.g., per-turn cost logging).
   });
 
   /* ------------------------------------------------------------------ */
-  /*  session_start — reset state for new sessions                       */
+  /*  session_start — reset per-session state (keep model detection)     */
   /* ------------------------------------------------------------------ */
 
   pi.on("session_start", () => {
-    // Don't reset isDeepSeekSession — model_select re-detects on model change.
-    // Resetting here would wipe the detection that happened before the first turn.
+    // Keep isDeepSeekSession/currentModel across sessions.
+    // session_start fires on new/forked sessions but doesn't change the model.
     prefixGuard.reset();
     logTracker.reset();
     prefixHash = "";
@@ -238,11 +259,4 @@ export default function (pi: ExtensionAPI) {
       (_ctx as unknown as { ui?: { notify?: (msg: string, type?: string) => void } }).ui?.notify?.(lines.join("\n"), "info");
     },
   });
-
-  /* ------------------------------------------------------------------ */
-  /*  Notify on load                                                     */
-  /* ------------------------------------------------------------------ */
-
-  console.log("[pi-reasonix] Loaded. Active for DeepSeek providers.");
-  console.log("[pi-reasonix] Pillars: Cache-First Loop | Tool-Call Repair | Cost Control");
 }
