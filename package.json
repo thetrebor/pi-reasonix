@@ -1,14 +1,18 @@
 {
   "name": "pi-reasonix",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "DeepSeek-native optimizations for Pi: cache-first prefix stabilization, tool-call repair, and cost control.",
   "keywords": [
     "pi-package",
     "pi-extension",
     "deepseek",
+    "prefix-cache",
+    "context-caching",
     "cache-first",
     "tool-call-repair",
-    "prefix-cache"
+    "reasonix",
+    "llm-optimization",
+    "cost-control"
   ],
   "license": "MIT",
   "author": "TheTrebor",
