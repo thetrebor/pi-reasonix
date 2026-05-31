@@ -26,9 +26,6 @@ import type {
 import { PrefixGuard, AppendOnlyLog } from "../src/cache-first.js";
 import { compactToolResults, estimateContextUsage } from "../src/cost-control.js";
 import type { ReasonixStats, DeepSeekChatMessage } from "../src/types.js";
-import { writeFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                             */
@@ -68,6 +65,7 @@ export default async function (pi: ExtensionAPI) {
   const stats: ReasonixStats = {
     cacheHitTokens: 0,
     cacheMissTokens: 0,
+    cacheWriteTokens: 0,
     callsRepaired: 0,
     callsScavenged: 0,
     stormsSuppressed: 0,
@@ -200,6 +198,10 @@ export default async function (pi: ExtensionAPI) {
   /*  after_provider_response — extract cache-hit metrics                */
   /* ------------------------------------------------------------------ */
 
+  /* ------------------------------------------------------------------ */
+  /*  after_provider_response — fallback header-based cache tracking     */
+  /* ------------------------------------------------------------------ */
+
   pi.on("after_provider_response", (event: { status: number; headers: Record<string, string> }) => {
     if (!isDeepSeekSession) return;
     const headers = event.headers ?? {};
@@ -210,37 +212,42 @@ export default async function (pi: ExtensionAPI) {
   });
 
   /* ------------------------------------------------------------------ */
-  /*  TEMP DEBUG: message_end — inspect AgentMessage for usage/cache data */
+  /*  message_end — extract cache metrics from response usage data       */
   /* ------------------------------------------------------------------ */
 
-  let _debugCount = 0;
   (pi.on as (...args: unknown[]) => void)(
     "message_end",
     (event: Record<string, unknown>) => {
       if (!isDeepSeekSession) return;
-      _debugCount++;
-      if (_debugCount > 2) return; // only first 2 calls
-
       const msg = event?.message as Record<string, unknown> | undefined;
       if (!msg) return;
 
-      const keys = Object.keys(msg);
-      const usageInfo: Record<string, unknown> = { keys };
+      // Only assistant messages carry usage data
+      const role = msg.role as string | undefined;
+      if (role !== "assistant") return;
 
-      // Grab any suspect fields
-      const suspectFields = ["usage", "raw", "metadata", "response", "finishReason", "tokenUsage", "cacheTokens", "promptTokens", "completionTokens"];
-      for (const field of suspectFields) {
-        if (field in msg) {
-          usageInfo[field] = msg[field];
-        }
+      const usage = msg.usage as Record<string, unknown> | undefined;
+      if (!usage) return;
+
+      // OpenCode format: usage.cacheRead, usage.cacheWrite
+      // DeepSeek format: usage.prompt_cache_hit_tokens, usage.prompt_cache_miss_tokens
+      const cacheRead = (usage.cacheRead as number)
+        ?? (usage.prompt_cache_hit_tokens as number)
+        ?? 0;
+      const cacheWrite = (usage.cacheWrite as number)
+        ?? (usage.prompt_cache_write_tokens as number)
+        ?? 0;
+      const totalInput = (usage.input as number)
+        ?? (usage.prompt_tokens as number)
+        ?? 0;
+
+      if (cacheRead > 0) stats.cacheHitTokens += cacheRead;
+      if (cacheWrite > 0) stats.cacheWriteTokens += cacheWrite;
+      // Miss tokens = total input minus what was served from cache
+      if (totalInput > 0) {
+        const missTokens = Math.max(0, totalInput - cacheRead);
+        stats.cacheMissTokens += missTokens;
       }
-
-      const debugDir = join(homedir(), ".sandcastle", "tmp");
-      mkdirSync(debugDir, { recursive: true });
-      writeFileSync(
-        join(debugDir, `pi-reasonix-message-end-debug-${_debugCount}.json`),
-        JSON.stringify(usageInfo, null, 2),
-      );
     },
   );
 
@@ -291,7 +298,8 @@ export default async function (pi: ExtensionAPI) {
         "",
         "  📊 Cache",
         `    Hit tokens:  ${stats.cacheHitTokens.toLocaleString()}`,
-        `    Miss tokens:  ${stats.cacheMissTokens.toLocaleString()}`,
+        `    Miss tokens: ${stats.cacheMissTokens.toLocaleString()}`,
+        `    Write tokens: ${stats.cacheWriteTokens.toLocaleString()}`,
         `    Hit ratio:    ${getHitRatio(stats)}`,
         "",
         "  🔧 Repairs",

@@ -45,6 +45,8 @@ export interface ReasonixStats {
   /** Cumulative cache-hit tokens from DeepSeek response headers. */
   cacheHitTokens: number;
   cacheMissTokens: number;
+  /** Tokens written to disk cache for future requests. */
+  cacheWriteTokens: number;
   /** Repair pipeline counters. */
   callsRepaired: number;
   callsScavenged: number;
