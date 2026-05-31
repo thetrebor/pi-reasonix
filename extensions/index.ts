@@ -241,11 +241,13 @@ export default async function (pi: ExtensionAPI) {
         "",
         `  Active:        ${isDeepSeekSession ? `✅ Yes (${currentModel})` : "⏸️  No (not DeepSeek)"}`,
         `  Prefix hash:   ${prefixHash || "(no calls yet)"}`,
-        `  Prefix stable: ${prefixGuard.isInitialized()
-          ? prefixGuard.isStable()
-            ? "✅"
-            : "❌ (changed)"
-          : "⏳ (no calls yet)"}`,
+        `  Prefix stable: ${!prefixGuard.isInitialized()
+          ? "⏳ (no calls yet)"
+          : prefixGuard.callCount < 2
+            ? "⏳ (need 1 more call)"
+            : prefixGuard.isStable()
+              ? "✅"
+              : "❌ (changed)"}`,
         `  Calls:         ${prefixGuard.callCount} since last reset`,
         `  Truncations:   ${stats.conversationTruncations}`,
         "",
