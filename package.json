@@ -1,0 +1,49 @@
+{
+  "name": "pi-reasonix",
+  "version": "0.1.0",
+  "description": "DeepSeek-native optimizations for Pi: cache-first prefix stabilization, tool-call repair, and cost control.",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "deepseek",
+    "cache-first",
+    "tool-call-repair",
+    "prefix-cache"
+  ],
+  "license": "MIT",
+  "author": "TheTrebor",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TheTrebor/pi-reasonix.git"
+  },
+  "bugs": {
+    "url": "https://github.com/TheTrebor/pi-reasonix/issues"
+  },
+  "homepage": "https://github.com/TheTrebor/pi-reasonix#readme",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "test": "node --experimental-vm-modules test/*.test.mjs",
+    "lint": "biome check .",
+    "format": "biome format --write .",
+    "check": "npm run build && npm run test"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  },
+  "files": [
+    "extensions/",
+    "src/",
+    "README.md",
+    "LICENSE"
+  ]
+}
