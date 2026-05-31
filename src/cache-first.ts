@@ -100,6 +100,11 @@ export class PrefixGuard {
     return this._prefixHash !== "";
   }
 
+  /** Whether the guard has ever been initialized (computed at least once). */
+  isInitialized(): boolean {
+    return this._prefixHash !== "" || this._lastPrefix.length > 0;
+  }
+
   /** Reset (new session). */
   reset(): void {
     this._systemHash = "";

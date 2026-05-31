@@ -236,8 +236,12 @@ export default async function (pi: ExtensionAPI) {
         "╚══════════════════════════════════════════════╝",
         "",
         `  Active:        ${isDeepSeekSession ? `✅ Yes (${currentModel})` : "⏸️  No (not DeepSeek)"}`,
-        `  Prefix hash:   ${prefixHash || "(none)"}`,
-        `  Prefix stable: ${prefixGuard.isStable() ? "✅" : "❌"}`,
+        `  Prefix hash:   ${prefixHash || "(no calls yet)"}`,
+        `  Prefix stable: ${prefixGuard.isInitialized()
+          ? prefixGuard.isStable()
+            ? "✅"
+            : "❌ (changed)"
+          : "⏳ (no calls yet)"}`,
         "",
         "  📊 Cache",
         `    Hit tokens:   ${stats.cacheHitTokens.toLocaleString()}`,
