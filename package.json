@@ -36,7 +36,7 @@
   },
   "pi": {
     "extensions": [
-      "./extensions"
+      "./dist/extensions"
     ]
   },
   "peerDependencies": {
@@ -47,7 +47,7 @@
     "typescript": "^5.7.0"
   },
   "files": [
-    "extensions/",
+    "dist/",
     "src/",
     "README.md",
     "LICENSE"
