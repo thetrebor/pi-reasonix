@@ -1,6 +1,6 @@
 {
   "name": "pi-reasonix",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "DeepSeek-native optimizations for Pi: cache-first prefix stabilization, tool-call repair, and cost control.",
   "keywords": [
     "pi-package",
@@ -28,7 +28,7 @@
   "scripts": {
     "build": "tsc",
     "prepublishOnly": "npm run build && npm run test",
-    "test": "node --experimental-vm-modules test/*.test.mjs",
+    "test": "npm run build && node --experimental-vm-modules test/*.test.mjs",
     "check": "npm run build && npm run test"
   },
   "publishConfig": {

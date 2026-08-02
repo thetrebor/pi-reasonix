@@ -66,8 +66,8 @@ The three pillars of this extension are designed around these mechanics.
 **What the extension does:**
 
 - **Reorders messages** so the system prompt is always first (ensuring byte 0 is stable)
-- **Tracks a prefix hash** from the system prompt content + tool-call signatures
-- **Verifies append-only ordering** — if Pi truncates conversation history (context window compaction), the prefix hash is unaffected because it only considers the system prompt and tool definitions
+- **Tracks a prefix hash** from the system prompt content + **tool definitions** (`payload.tools`) — the two things that make up DeepSeek's cache head. Tool *calls* in the history are deliberately excluded: they grow every turn, and hashing them made the stability indicator permanently red even at a 98% hit ratio.
+- **Verifies append-only ordering** — if Pi truncates conversation history (context window compaction), the check recovers its baseline so the status stays meaningful
 - **Reports stability status** via `/reasonix-status` so you can confirm the prefix is stable before expecting cache hits
 
 **Observed effect:** Cache hit ratio climbs from near-zero to ~94% after 2–3 turns with a stable prefix. On OpenCode Go (which proxies DeepSeek), one measured run showed `input_tokens: 168,112` with `cached_tokens: 164,736` — a **97.99% hit rate**.
@@ -80,16 +80,16 @@ DeepSeek's chat-completion API has known edge cases in tool-call generation that
 |---|---|
 | Tool calls emitted *inside* `<think>` reasoning blocks instead of as structured tool_calls | Scavenged via regex parsing of the reasoning content, then injected as proper tool_calls in the next request |
 | Deeply nested or wide JSON schemas (>10 parameters) causing truncation | Flattened to dot-notation keys to reduce depth and width |
-| Truncated JSON mid-structure (missing closing braces/brackets) | Auto-closed via a JSON repair parser |
-| Identical tool-call + argument combinations repeated back-to-back (call-storm) | Detected via content hashing; duplicated calls are suppressed |
+| Truncated JSON mid-structure (missing closing braces/brackets) | Auto-closed via a JSON repair parser at `message_end` — the repaired arguments are what Pi executes (same object reference the dispatcher reads) |
+| Identical tool-call + argument combinations repeated back-to-back (call-storm) | Detected via content hashing; duplicated calls are suppressed from the message before execution |
 
-The repair pipeline runs silently and its counters are visible in `/reasonix-status`.
+The repair pipeline runs at `message_end` and its counters are visible in `/reasonix-status`.
 
 ### Pillar 3 — Cost Control
 
 | Mechanism | What It Does |
 |---|---|
-| Tool-result compaction | Tool outputs >3000 tokens are summarized/compacted before being sent as `tool_result` messages |
+| Tool-result compaction | Tool outputs over the token cap are compacted **keeping both the head and the tail** — the end of a long output (errors, summaries, final rows) is never silently discarded. Cap defaults to 3000 tokens, override with `REASONIX_RESULT_CAP_TOKENS` |
 | Context-pressure tracking | Total estimated token count is tracked per-turn and surfaced in the status display |
 | Flash-first routing | (Reserved for future use — prioritize cheaper models for preliminary passes) |
 
@@ -103,9 +103,9 @@ This is a standard Pi extension using Pi's event system. No modifications to Pi 
 |---|---|---|
 | `model_select` | Detects when user switches to/from a DeepSeek model | Toggles `isDeepSeekSession` flag |
 | `before_provider_request` | **Prefix stabilization** — reorders messages, computes prefix hash, compacts tool results | Returns modified payload |
-| `after_provider_response` | Header-based cache metric extraction (OpenRouter-style) | Reads `x-cache-hit-tokens` headers |
-| `message_end` | **Body-based cache metric extraction** — reads `usage.cacheRead` from AgentMessage | Handles both OpenCode (`cacheRead`) and DeepSeek (`prompt_cache_hit_tokens`) formats |
-| `turn_end` | Reserved for future per-turn cost logging | (no-op currently) |
+| `after_provider_response` | Header-based cache metric extraction (OpenRouter-style) | Stashes `x-cache-hit-tokens` headers (applied only if no usage arrives — no double counting) |
+| `message_end` | **Body-based cache metric extraction** + **tool-call repair** | Reads `usage.cacheRead` from AgentMessage (preferred over headers); repairs truncated args, suppresses call-storms, and (opt-in) scavenges leaked calls |
+| `turn_end` | Applies stashed header tokens if no usage arrived | Also reserved for per-turn cost logging |
 | `session_start` | Resets prefix state for new conversations | Keeps model detection across sessions |
 | `/reasonix-status` (TUI command) | Displays live cache and repair statistics | Registered via `pi.registerCommand()` |
 
@@ -119,11 +119,18 @@ This three-layer detection ensures the extension activates before any API call, 
 
 ### Cache metric extraction
 
-The extension is tolerant of both metric sources:
+The extension is tolerant of both metric sources and never double counts:
 
-- **OpenCode Go/Zen** — wraps usage data in AgentMessage metadata with `usage.cacheRead`, `usage.cacheWrite`, `usage.input` fields
-- **DeepSeek direct** — returns `usage.prompt_cache_hit_tokens`, `usage.prompt_cache_miss_tokens` in the response body
-- **OpenRouter / header-based** — falls back to `after_provider_response` headers (`x-cache-hit-tokens`, `x-cache-miss-tokens`)
+- **OpenCode Go/Zen** — wraps usage data in AgentMessage metadata with `usage.cacheRead`, `usage.cacheWrite`, `usage.input` fields (preferred)
+- **DeepSeek direct** — returns `usage.prompt_cache_hit_tokens`, `usage.prompt_cache_miss_tokens` in the response body (preferred)
+- **OpenRouter / header-based** — falls back to `after_provider_response` headers (`x-cache-hit-tokens`, `x-cache-miss-tokens`); headers are stashed at response time and only applied when no usage fields arrive
+
+### Environment variables
+
+| Variable | Default | Effect |
+|---|---|---|
+| `REASONIX_RESULT_CAP_TOKENS` | `3000` | Token cap per tool result before head+tail compaction |
+| `REASONIX_SCAVENGE` | `0` | Set to `1` to auto-append tool calls scavenged from `<think>`/reasoning content |
 
 ---
 
@@ -251,7 +258,7 @@ npm install
 # Compile TypeScript → dist/
 npm run build
 
-# Run test suite (27 tests: 14 unit + 13 integration)
+# Run test suite (21 tests: unit + integration; builds dist/ first)
 npm test
 ```
 

@@ -7,7 +7,12 @@
  * of the previous request matches. Most agent loops reorder, rewrite, or inject
  * fresh timestamps each turn — cache hit rate in practice: <20%.
  *
- * This module tracks the system prefix and ensures messages are serialized in
+ * The prefix that matters to DeepSeek is the *serialized request head*:
+ * the system message followed by the tool definitions (payload.tools).
+ * Conversation content appends after that stable head. If the head is
+ * byte-identical across turns, the disk cache hits on every repeat.
+ *
+ * This module tracks that head and ensures messages are serialized in
  * append-only order so the prefix stays byte-stable across turns.
  */
 
@@ -45,13 +50,12 @@ export function isDeepSeekProvider(baseUrl: string): boolean {
  * These are what determine DeepSeek's prefix-cache matching — the rest of
  * the conversation history just appends after the stable prefix.
  *
- * Message truncation (context window compaction) does NOT affect prefix
- * stability, because the prefix hash only considers:
- *   1. The system message content
- *   2. The tool-call definitions (assistant messages with tool_calls)
- *
- * If neither changes across turns, the prefix is "stable" and DeepSeek's
- * automatic disk cache will hit on every repeat of the same prefix bytes.
+ * IMPORTANT: the tools hash is computed from the *tool definitions*
+ * (the OpenAI `tools` array in the request payload), NOT from assistant
+ * tool_calls in the message history. Tool *calls* grow every turn; hashing
+ * them made the "prefix stable" indicator permanently red even when the
+ * actual cache head was byte-identical (observed: 98.2% hit ratio with
+ * `Prefix stable: ❌`). Tool *definitions* are what the cache head contains.
  */
 export class PrefixGuard {
   private _systemHash = "";
@@ -63,15 +67,14 @@ export class PrefixGuard {
   /** Stabilise messages array: system first, stable prefix hash. */
   stabilise(
     messages: DeepSeekChatMessage[],
+    tools?: unknown[],
   ): { messages: DeepSeekChatMessage[]; prefixHash: string } {
     const systemMsg = messages.find((m) => m.role === "system");
     const systemText = systemMsg?.content ?? "";
 
     const systemHash = fastHash(systemText);
-    const toolCallsJSON = JSON.stringify(
-      messages.filter((m) => m.role === "assistant" && m.tool_calls),
-    );
-    const toolsHash = fastHash(toolCallsJSON);
+    // Hash the *tool definitions* (stable), not tool calls (append-only).
+    const toolsHash = fastHash(JSON.stringify(tools ?? []));
     const prefixHash = fastHash(systemHash + "|" + toolsHash);
 
     // Always re-emit system first if it exists.
@@ -139,15 +142,19 @@ export class PrefixGuard {
 export class AppendOnlyLog {
   private _entryCount = 0;
 
-  /** Validate that the messages log has only grown (no deletions / reorders). */
+  /**
+   * Validate that the messages log has only grown (no deletions / reorders).
+   *
+   * Returns true when the entry count is non-decreasing. When a truncation
+   * is detected the baseline resets to the new (smaller) count so the next
+   * growth is validated correctly — otherwise the check would return false
+   * forever after the first compaction (observed: `conversationTruncations`
+   * inflating on every subsequent turn).
+   */
   validate(entries: DeepSeekChatMessage[]): boolean {
-    // We can't perfectly detect reordering without keeping a full copy,
-    // but we can detect truncation (entries removed from the end).
-    if (entries.length < this._entryCount) {
-      return false; // Entries were removed
-    }
+    const shrank = entries.length < this._entryCount;
     this._entryCount = entries.length;
-    return true;
+    return !shrank;
   }
 
   reset(): void {

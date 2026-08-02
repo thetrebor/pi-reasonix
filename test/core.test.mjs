@@ -1,7 +1,7 @@
 /**
  * Tests for pi-reasonix core modules.
  *
- * Run: node --test test/*.test.mjs
+ * Run: npm test  (builds dist/ first, then runs node --test)
  *
  * Tests import from the compiled JS (dist/src/) since Node ESM
  * cannot resolve .ts files directly without a loader.
@@ -46,6 +46,73 @@ describe("PrefixGuard", () => {
     assert.equal(r1.prefixHash, r2.prefixHash);
   });
 
+  it("stays stable as tool CALLS grow — tool definitions unchanged (regression)", async () => {
+    // Regression: the old implementation hashed assistant tool_calls, which
+    // grow every turn — making the prefix hash change on every turn even when
+    // the actual cache head (system + tool definitions) was byte-identical.
+    const { PrefixGuard } = await import("../dist/src/cache-first.js");
+    const guard = new PrefixGuard();
+    const tools = [
+      { type: "function", function: { name: "read", parameters: {} } },
+      { type: "function", function: { name: "bash", parameters: {} } },
+    ];
+
+    const r1 = guard.stabilise(
+      [{ role: "system", content: "you are a bot" }, { role: "user", content: "hi" }],
+      tools,
+    );
+    // Tool calls append to history turn after turn…
+    const r2 = guard.stabilise(
+      [
+        { role: "system", content: "you are a bot" },
+        { role: "user", content: "hi" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [{ id: "1", function: { name: "read", arguments: '{"path":"a"}' } }],
+        },
+      ],
+      tools,
+    );
+    const r3 = guard.stabilise(
+      [
+        { role: "system", content: "you are a bot" },
+        { role: "user", content: "hi" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            { id: "1", function: { name: "read", arguments: '{"path":"a"}' } },
+            { id: "2", function: { name: "bash", arguments: '{"cmd":"ls"}' } },
+          ],
+        },
+      ],
+      tools,
+    );
+
+    assert.equal(r1.prefixHash, r2.prefixHash);
+    assert.equal(r1.prefixHash, r3.prefixHash);
+  });
+
+  it("changes prefix hash when tool definitions change", async () => {
+    const { PrefixGuard } = await import("../dist/src/cache-first.js");
+    const guard = new PrefixGuard();
+
+    const r1 = guard.stabilise(
+      [{ role: "system", content: "you are a bot" }],
+      [{ type: "function", function: { name: "read", parameters: {} } }],
+    );
+    const r2 = guard.stabilise(
+      [{ role: "system", content: "you are a bot" }],
+      [
+        { type: "function", function: { name: "read", parameters: {} } },
+        { type: "function", function: { name: "write", parameters: {} } },
+      ],
+    );
+
+    assert.notEqual(r1.prefixHash, r2.prefixHash);
+  });
+
   it("detects changed prefix hash", async () => {
     const { PrefixGuard } = await import("../dist/src/cache-first.js");
     const guard = new PrefixGuard();
@@ -59,6 +126,54 @@ describe("PrefixGuard", () => {
     ]);
 
     assert.notEqual(r1.prefixHash, r2.prefixHash);
+  });
+
+  it("reports stable only after two identical calls", async () => {
+    const { PrefixGuard } = await import("../dist/src/cache-first.js");
+    const guard = new PrefixGuard();
+
+    guard.stabilise([{ role: "system", content: "s" }]);
+    assert.equal(guard.isStable(), false);
+    guard.stabilise([{ role: "system", content: "s" }]);
+    assert.equal(guard.isStable(), true);
+    guard.stabilise([{ role: "system", content: "DIFFERENT" }]);
+    assert.equal(guard.isStable(), false);
+  });
+});
+
+describe("AppendOnlyLog", () => {
+  it("accepts appended message logs", async () => {
+    const { AppendOnlyLog } = await import("../dist/src/cache-first.js");
+    const log = new AppendOnlyLog();
+
+    assert.equal(log.validate([{ role: "system" }, { role: "user", content: "hi" }]), true);
+    assert.equal(log.validate([
+      { role: "system" },
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "hello" },
+    ]), true);
+  });
+
+  it("rejects truncated message logs", async () => {
+    const { AppendOnlyLog } = await import("../dist/src/cache-first.js");
+    const log = new AppendOnlyLog();
+
+    assert.equal(log.validate([{ role: "system" }, { role: "user", content: "hi" }]), true);
+    assert.equal(log.validate([{ role: "system" }]), false);
+  });
+
+  it("recovers after a truncation (regression)", async () => {
+    // Regression: the old implementation returned false forever after the
+    // first detected truncation because it never reset the baseline — the
+    // `conversationTruncations` stat inflated on every subsequent turn.
+    const { AppendOnlyLog } = await import("../dist/src/cache-first.js");
+    const log = new AppendOnlyLog();
+
+    assert.equal(log.validate([{ role: "system" }, { role: "user", content: "a" }, { role: "user", content: "b" }]), true);
+    // Compacted: history shrank.
+    assert.equal(log.validate([{ role: "system" }, { role: "user", content: "summary" }]), false);
+    // Growth after compaction validates again.
+    assert.equal(log.validate([{ role: "system" }, { role: "user", content: "summary" }, { role: "assistant", content: "x" }]), true);
   });
 });
 
@@ -153,7 +268,25 @@ describe("compactToolResult", () => {
     );
 
     assert(result.content && result.content.length < longContent.length);
-    assert(result.content && result.content.includes("[content truncated:"));
+    assert(result.content && result.content.includes("content truncated:"));
+  });
+
+  it("keeps BOTH the head and the tail of long results (regression)", async () => {
+    const { compactToolResult } = await import("../dist/src/cost-control.js");
+    const head = "START-OF-OUTPUT\n" + "h".repeat(3000);
+    const tail = "t".repeat(3000) + "\nEND-OF-OUTPUT";
+    const longContent = head + tail;
+    const result = compactToolResult(
+      { role: "tool", content: longContent, tool_call_id: "1" },
+      1000, // cap well below content length
+    );
+
+    assert(result.content, "content missing");
+    // Tail survives — the end of the output is not silently discarded.
+    assert(result.content.includes("END-OF-OUTPUT"), "tail lost");
+    assert(result.content.includes("START-OF-OUTPUT"), "head lost");
+    // The original message object is not mutated.
+    assert.equal(longContent.length, 6000 + 30);
   });
 
   it("skips small tool results", async () => {
