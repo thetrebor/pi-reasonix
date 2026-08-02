@@ -1,6 +1,6 @@
 {
   "name": "pi-reasonix",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "DeepSeek-native optimizations for Pi: cache-first prefix stabilization, tool-call repair, and cost control.",
   "keywords": [
     "pi-package",

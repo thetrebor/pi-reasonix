@@ -100,6 +100,20 @@ describe("Extension factory wiring", () => {
     assert(cmd, "missing reasonix-status command");
     assert(cmd.description.includes("cache"), "description should mention cache");
   });
+
+  it("status output contains no unexpanded template literals (regression)", async () => {
+    const { api } = await loadExtension();
+    const handler = api._handlers.get("cmd:reasonix-status");
+    assert(handler, "reasonix-status command not registered");
+
+    let rendered = "";
+    await handler("", { ui: { notify: (msg) => { rendered = msg; } } });
+
+    assert(!rendered.includes("${"), "unexpanded template literal in status output");
+    assert(rendered.includes("Cap (tokens)"), "missing Cap line");
+    assert(rendered.includes("Scavenge:"), "missing Scavenge line");
+    assert(rendered.includes("Turns:"), "missing Turns line");
+  });
 });
 
 /* ------------------------------------------------------------------ */

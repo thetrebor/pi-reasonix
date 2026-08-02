@@ -458,7 +458,7 @@ export default async function (pi: ExtensionAPI) {
         `    Cap (tokens):      ${process.env.REASONIX_RESULT_CAP_TOKENS ?? "3000 (default)"}`,
         `    Scavenge:          ${SCAVENGE_ENABLED ? "on" : "off (REASONIX_SCAVENGE=1 to enable)"}`,
         "",
-        "  🔄 Turns:  ${stats.totalTurns}",
+        `  🔄 Turns:  ${stats.totalTurns}`,
         `  📦 Tokens: ~${(stats.totalTokens / 1000).toFixed(1)}K total`,
       ];
       _ctx.ui?.notify?.(lines.join("\n"), "info");
