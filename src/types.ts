@@ -58,4 +58,7 @@ export interface ReasonixStats {
   /** Session-level roll-ups. */
   totalTurns: number;
   totalTokens: number;
+  /** Session-level request counters (footer banner). */
+  totalRequests: number;
+  hitRequests: number;
 }
