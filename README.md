@@ -131,6 +131,7 @@ The extension is tolerant of both metric sources and never double counts:
 |---|---|---|
 | `REASONIX_RESULT_CAP_TOKENS` | `3000` | Token cap per tool result before head+tail compaction |
 | `REASONIX_SCAVENGE` | `0` | Set to `1` to auto-append tool calls scavenged from `<think>`/reasoning content |
+| `REASONIX_FOOTER` | `1` | One-line session cache footer in Pi's status bar; set to `0` to disable |
 
 ---
 
@@ -206,6 +207,25 @@ Example output after a few turns with a stable prefix:
 
 ---
 
+
+## Footer
+
+Reasonix renders a one-line summary of the current session's cache usage into Pi's status bar (the same surface pi-cache-optimizer uses):
+
+```
+⚡️ 560/572 · 86.80M/90.01M (96%) · w0.20M · 🔧2 · 🌀1 · ⚙3
+```
+
+- `hitRequests/totalRequests` — requests that reported a cache read
+- `cached/total input tokens` — tokens served from DeepSeek's disk cache vs. total input, plus a token-level hit percentage
+- `w<X>` — tokens written to the cache (shown when non-zero)
+- `🔧`/`🌀`/`⚙` — repaired tool calls, suppressed call storms, compacted tool results (each shown when non-zero)
+
+Counters are session-scoped: they reset on `/reload` or Pi restart, like pi-cache-optimizer's session footer mode. The footer refreshes at `message_end`/`turn_end` and skips redundant renders. Its status key is `!reasonix` so Pi's alphabetical status sort keeps it leftmost in the footer.
+
+- Default **on** for DeepSeek sessions; set `REASONIX_FOOTER=0` to disable.
+- The same numbers appear in `/reasonix-status` under `Footer:`.
+
 ## Verification
 
 On load, the extension logs to Pi's output:
@@ -231,9 +251,11 @@ pi-reasonix/
 │   ├── repair.ts         # 4-pass tool-call repair pipeline
 │   │                     #   (scavenge, truncation repair, flatten, storm detection)
 │   ├── cost-control.ts   # Tool-result compaction, context estimation
+│   ├── footer.ts         # Session cache stats + one-line footer rendering
 │   └── types.ts          # Shared interfaces and type definitions
 ├── test/
 │   ├── core.test.mjs     # Unit tests for PrefixGuard, AppendOnlyLog, repair, cost control
+│   ├── footer.test.mjs   # Unit tests for session footer rendering
 │   └── core.integration.test.mjs  # Integration tests for extension wiring
 ├── package.json
 ├── tsconfig.json

@@ -33,7 +33,12 @@ import {
   scavengeToolCalls,
   detectCallStorm,
 } from "../src/repair.js";
-import type { ReasonixStats, DeepSeekChatMessage } from "../src/types.js";
+import { formatCacheFooter } from "../src/footer.js";
+import type {
+  ReasonixStats,
+  DeepSeekChatMessage,
+} from "../src/types.js";
+
 
 /* ------------------------------------------------------------------ */
 /*  Config                                                              */
@@ -47,9 +52,30 @@ import type { ReasonixStats, DeepSeekChatMessage } from "../src/types.js";
 const SCAVENGE_ENABLED =
   (process.env.REASONIX_SCAVENGE ?? "0") === "1";
 
+/**
+ * Persistent one-line cache footer in Pi's status bar (like the footer of
+ * pi-cache-optimizer). Backed by a small JSON file so the counters survive
+ * Pi restarts. Default on; set REASONIX_FOOTER=0 to disable.
+ *
+ * The footer only renders read-mostly stats — it never mutates requests,
+ * so unlike SCAVENGE it is safe to enable by default.
+ */
+const FOOTER_ENABLED =
+  (process.env.REASONIX_FOOTER ?? "1") !== "0";
+
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                             */
 /* ------------------------------------------------------------------ */
+
+function footerUi(ctx: unknown):
+  | { setStatus?: (key: string, text: string | undefined) => void }
+  | undefined {
+  return (
+    ctx as
+      | { ui?: { setStatus?: (key: string, text: string | undefined) => void } }
+      | undefined
+  )?.ui;
+}
 
 const DEEPSEEK_MODEL_PATTERNS = [
   "deepseek-chat",
@@ -107,11 +133,15 @@ export default async function (pi: ExtensionAPI) {
     conversationTruncations: 0,
     totalTurns: 0,
     totalTokens: 0,
+    totalRequests: 0,
+    hitRequests: 0,
   };
 
   let isDeepSeekSession = false;
   let prefixHash = "";
   let currentModel = "";
+
+  let lastFooterText = "";
 
   /**
    * Header-derived cache tokens for the current provider response.
@@ -271,13 +301,40 @@ export default async function (pi: ExtensionAPI) {
     },
   );
 
+  /**
+   * Push the current session's cache usage into Pi's status bar.
+   * Idempotent: no-op while the text is unchanged, off when REASONIX_FOOTER=0.
+   * setStatus lives on the handler context (ExtensionContext.ui), not on the
+   * top-level ExtensionAPI, so renderFooter receives it from the caller.
+   */
+  function renderFooter(ui?: {
+    setStatus?: (key: string, text: string | undefined) => void;
+  }): void {
+    if (!FOOTER_ENABLED || !isDeepSeekSession || !currentModel) return;
+    const text = formatCacheFooter({
+      totalRequests: stats.totalRequests,
+      hitRequests: stats.hitRequests,
+      cachedInputTokens: stats.cacheHitTokens,
+      totalInputTokens: stats.cacheHitTokens + stats.cacheMissTokens,
+      cacheWriteInputTokens: stats.cacheWriteTokens,
+      callsRepaired: stats.callsRepaired,
+      stormsSuppressed: stats.stormsSuppressed,
+      resultsCompacted: stats.resultsCompacted,
+    });
+    if (text === lastFooterText) return;
+    lastFooterText = text;
+    // Key starts with "!" so Pi's alphabetical footer sort puts this first,
+    // left of pi-lens and any other extension statuses.
+    ui?.setStatus?.("!reasonix", text);
+  }
+
   /* ------------------------------------------------------------------ */
   /*  message_end — extract cache metrics + repair model tool calls      */
   /* ------------------------------------------------------------------ */
 
   (pi.on as (...args: unknown[]) => void)(
     "message_end",
-    (event: Record<string, unknown>) => {
+    (event: Record<string, unknown>, ctx?: unknown) => {
       const msg = event?.message as Record<string, unknown> | undefined;
       if (!msg) return;
 
@@ -304,12 +361,18 @@ export default async function (pi: ExtensionAPI) {
             const missTokens = Math.max(0, totalInput - cacheRead);
             stats.cacheMissTokens += missTokens;
           }
+          stats.totalRequests++;
+          if (cacheRead > 0) stats.hitRequests++;
+          renderFooter(footerUi(ctx));
           // Usage is authoritative for this response; discard header stash.
           pendingHeaderTokens = null;
         } else if (pendingHeaderTokens) {
           // No usage fields — fall back to the response headers.
           stats.cacheHitTokens += pendingHeaderTokens.hit;
           stats.cacheMissTokens += pendingHeaderTokens.miss;
+          stats.totalRequests++;
+          if (pendingHeaderTokens.hit > 0) stats.hitRequests++;
+          renderFooter(footerUi(ctx));
           pendingHeaderTokens = null;
         }
       }
@@ -397,12 +460,17 @@ export default async function (pi: ExtensionAPI) {
   /*  turn_end — apply stashed header tokens if no usage arrived         */
   /* ------------------------------------------------------------------ */
 
-  pi.on("turn_end", (_event: TurnEndEvent) => {
+  pi.on("turn_end", (_event: TurnEndEvent, ctx?: unknown) => {
     if (pendingHeaderTokens) {
       stats.cacheHitTokens += pendingHeaderTokens.hit;
       stats.cacheMissTokens += pendingHeaderTokens.miss;
+      stats.totalRequests++;
+      if (pendingHeaderTokens.hit > 0) stats.hitRequests++;
       pendingHeaderTokens = null;
     }
+    // Refresh the footer at every turn boundary (also covers header-stash-only
+    // responses and model switches that changed the displayed bucket).
+    renderFooter(footerUi(ctx));
   });
 
   /* ------------------------------------------------------------------ */
@@ -447,6 +515,20 @@ export default async function (pi: ExtensionAPI) {
         `    Miss tokens: ${stats.cacheMissTokens.toLocaleString()}`,
         `    Write tokens: ${stats.cacheWriteTokens.toLocaleString()}`,
         `    Hit ratio:    ${getHitRatio(stats)}`,
+        `    Footer:       ${
+          FOOTER_ENABLED
+            ? formatCacheFooter({
+                totalRequests: stats.totalRequests,
+                hitRequests: stats.hitRequests,
+                cachedInputTokens: stats.cacheHitTokens,
+                totalInputTokens: stats.cacheHitTokens + stats.cacheMissTokens,
+                cacheWriteInputTokens: stats.cacheWriteTokens,
+                callsRepaired: stats.callsRepaired,
+                stormsSuppressed: stats.stormsSuppressed,
+                resultsCompacted: stats.resultsCompacted,
+              })
+            : "off (REASONIX_FOOTER=1 to enable)"
+        }`,
         "",
         "  🔧 Repairs",
         `    Args repaired:     ${stats.callsRepaired}`,

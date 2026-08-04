@@ -28,7 +28,7 @@
   "scripts": {
     "build": "tsc",
     "prepublishOnly": "npm run build && npm run test",
-    "test": "npm run build && node --experimental-vm-modules test/*.test.mjs",
+    "test": "npm run build && node --experimental-vm-modules --test test/*.test.mjs",
     "check": "npm run build && npm run test"
   },
   "publishConfig": {
