@@ -48,6 +48,27 @@ const SCAVENGE_ENABLED =
   (process.env.REASONIX_SCAVENGE ?? "0") === "1";
 
 /* ------------------------------------------------------------------ */
+/*  Configuration (env vars, mirroring PI_HARNESS_* convention)         */
+/* ------------------------------------------------------------------ */
+
+function envBool(name: string, def: boolean): boolean {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return def;
+  return !["0", "false", "no", "off", ""].includes(raw.toLowerCase());
+}
+
+const REASONIX_CONFIG = {
+  /** Master switch. When false, no hooks fire. */
+  enabled: envBool("PI_REASONIX_ENABLED", true),
+  /** Pillar 1 — cache prefix stabilization (system-first reorder + hash tracking). */
+  cache: envBool("PI_REASONIX_CACHE", true),
+  /** Pillar 3 — tool-result compaction + context tracking. */
+  cost: envBool("PI_REASONIX_COST", true),
+  /** Cache metric extraction (after_provider_response + message_end). */
+  metrics: envBool("PI_REASONIX_METRICS", true),
+};
+
+/* ------------------------------------------------------------------ */
 /*  Helpers                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -89,6 +110,14 @@ function toolCallKey(
 /* ------------------------------------------------------------------ */
 
 export default async function (pi: ExtensionAPI) {
+  if (!REASONIX_CONFIG.enabled) {
+    console.log("[pi-reasonix] Disabled (PI_REASONIX_ENABLED=0).");
+    return;
+  }
+  console.log(
+    `[pi-reasonix] Loaded. cache=${REASONIX_CONFIG.cache ? "on" : "off"} cost=${REASONIX_CONFIG.cost ? "on" : "off"} metrics=${REASONIX_CONFIG.metrics ? "on" : "off"}`,
+  );
+
   /* ------------------------------------------------------------------ */
   /*  Session-scoped state                                               */
   /* ------------------------------------------------------------------ */
@@ -212,38 +241,42 @@ export default async function (pi: ExtensionAPI) {
       const messages = payload.messages as DeepSeekChatMessage[] | undefined;
       if (!messages || messages.length === 0) return;
 
+      let working = messages;
+
       // 1. Stabilise the prefix: system first, and hash the cache head
       //    (system message + tool *definitions*), not the growing history.
-      const stabilised = prefixGuard.stabilise(
-        messages,
-        payload.tools as unknown[] | undefined,
-      );
-      prefixHash = stabilised.prefixHash;
+      if (REASONIX_CONFIG.cache) {
+        const stabilised = prefixGuard.stabilise(
+          working,
+          payload.tools as unknown[] | undefined,
+        );
+        prefixHash = stabilised.prefixHash;
+        working = stabilised.messages;
 
-      // 2. Check append-only invariant (truncation doesn't affect prefix hash)
-      if (!logTracker.validate(stabilised.messages as DeepSeekChatMessage[])) {
-        // Pi truncated older messages to fit the context window. The cache
-        // head (system + tools) survives; the truncated conversation bulk is
-        // a cache miss on the next request — counted for the status display.
-        logTracker.reset();
-        stats.conversationTruncations++;
+        // 2. Check append-only invariant (truncation doesn't affect prefix hash)
+        if (!logTracker.validate(working as DeepSeekChatMessage[])) {
+          // Pi truncated older messages to fit the context window. The cache
+          // head (system + tools) survives; the truncated conversation bulk is
+          // a cache miss on the next request — counted for the status display.
+          logTracker.reset();
+          stats.conversationTruncations++;
+        }
       }
 
       // 3. Compact oversized tool results (head+tail preserving)
-      const compacted = compactToolResults(
-        stabilised.messages as DeepSeekChatMessage[],
-      );
-      stats.resultsCompacted += compacted.compactedCount;
+      if (REASONIX_CONFIG.cost) {
+        const compacted = compactToolResults(working as DeepSeekChatMessage[]);
+        stats.resultsCompacted += compacted.compactedCount;
+        working = compacted.compacted;
+      }
 
       // 4. Track context metrics
-      const ctxTokens = estimateContextUsage(
-        compacted.compacted as DeepSeekChatMessage[],
-      );
+      const ctxTokens = estimateContextUsage(working as DeepSeekChatMessage[]);
       stats.totalTokens = ctxTokens;
       stats.totalTurns++;
 
       // 5. Return modified payload
-      return { ...payload, messages: compacted.compacted };
+      return { ...payload, messages: working };
     },
   );
 
@@ -254,7 +287,7 @@ export default async function (pi: ExtensionAPI) {
   pi.on(
     "after_provider_response",
     (event: { status: number; headers: Record<string, string> }) => {
-      if (!isDeepSeekSession) return;
+      if (!isDeepSeekSession || !REASONIX_CONFIG.metrics) return;
       const headers = event.headers ?? {};
       const hit =
         headers["x-cache-hit-tokens"] ?? headers["prompt_cache_hit_tokens"];
@@ -282,7 +315,7 @@ export default async function (pi: ExtensionAPI) {
       if (!msg) return;
 
       /* ---- cache metrics (assistant messages carry usage) ---- */
-      if (isDeepSeekSession && msg.role === "assistant") {
+      if (REASONIX_CONFIG.metrics && isDeepSeekSession && msg.role === "assistant") {
         const usage = msg.usage as Record<string, unknown> | undefined;
         if (usage) {
           // OpenCode format: usage.cacheRead, usage.cacheWrite
@@ -412,9 +445,11 @@ export default async function (pi: ExtensionAPI) {
   pi.on("session_start", () => {
     // Keep isDeepSeekSession/currentModel across sessions.
     // session_start fires on new/forked sessions but doesn't change the model.
-    prefixGuard.reset();
-    logTracker.reset();
-    prefixHash = "";
+    if (REASONIX_CONFIG.cache) {
+      prefixGuard.reset();
+      logTracker.reset();
+      prefixHash = "";
+    }
     pendingHeaderTokens = null;
   });
 
