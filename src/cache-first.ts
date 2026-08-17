@@ -23,7 +23,11 @@ import type { DeepSeekChatMessage, PrefixHash } from "./types.js";
  * DeepSeek's cache is byte-prefix based, so we just need a deterministic
  * fingerprint to detect changes.
  */
-export function fastHash(value: string): string {
+export function fastHash(value: unknown): string {
+  // Guard: request payloads can carry non-string content (image/blob tool
+  // results, raw message objects) when consumed from agent frameworks that
+  // type them loosely. Coerce defensively; the string path is byte-identical.
+  if (typeof value !== "string") value = String(value ?? "");
   let h = 0;
   for (let i = 0; i < value.length; i++) {
     h = ((h << 5) - h + value.charCodeAt(i)) | 0;
