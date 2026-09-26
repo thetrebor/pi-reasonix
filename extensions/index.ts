@@ -11,18 +11,17 @@
  * The extension activates automatically when the current model is a
  * DeepSeek model (deepseek-chat, deepseek-reasoner, deepseek-v4, etc.).
  *
- * Detection happens at three levels:
- *   1. Init-time: reads pi's defaultModel from settings.json
- *   2. model_select: fires when user switches model via /model
- *   3. before_provider_request: fires before each API call (fallback)
+ * Detection uses Pi's live model context on startup and before requests,
+ * model_select events, and a payload-ID fallback when context is unavailable.
  */
 
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
+  ExtensionContext,
   BeforeProviderRequestEvent,
   TurnEndEvent,
-} from "@earendil-works/Pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import { PrefixGuard, AppendOnlyLog } from "../src/cache-first.js";
 import {
   compactToolResults,
@@ -72,23 +71,19 @@ const REASONIX_CONFIG = {
 /*  Helpers                                                             */
 /* ------------------------------------------------------------------ */
 
-const DEEPSEEK_MODEL_PATTERNS = [
-  "deepseek-chat",
-  "deepseek-reasoner",
-  "deepseek-v4",
-  "deepseek-v3",
-  "deepseek-r1",
-];
-
-function isDeepSeekModelId(model: string): boolean {
-  const m = model.toLowerCase();
-  return DEEPSEEK_MODEL_PATTERNS.some((p) => m.startsWith(p) || m.includes(p));
+function modelIdentity(model: unknown): string[] {
+  if (typeof model === "string") return [model];
+  if (!model || typeof model !== "object") return [];
+  const record = model as Record<string, unknown>;
+  return [record.id, record.name, record.provider].filter(
+    (value): value is string => typeof value === "string" && value.length > 0,
+  );
 }
 
 function getHitRatio(
-  stats: Pick<ReasonixStats, "cacheHitTokens" | "cacheMissTokens">,
+  stats: Pick<ReasonixStats, "cacheHitTokens" | "cacheMissTokens" | "cacheWriteTokens">,
 ): string {
-  const total = stats.cacheHitTokens + stats.cacheMissTokens;
+  const total = stats.cacheHitTokens + stats.cacheMissTokens + stats.cacheWriteTokens;
   if (total === 0) return "-- (no calls yet)";
   return ((stats.cacheHitTokens / total) * 100).toFixed(1) + "%";
 }
@@ -142,6 +137,13 @@ export default async function (pi: ExtensionAPI) {
   let prefixHash = "";
   let currentModel = "";
 
+  function updateModel(model: unknown): void {
+    const identity = modelIdentity(model);
+    if (identity.length === 0) return;
+    currentModel = identity[0];
+    isDeepSeekSession = identity.some((part) => part.toLowerCase().includes("deepseek"));
+  }
+
   /**
    * Header-derived cache tokens for the current provider response.
    * Held back until message_end: usage fields (when present) are preferred,
@@ -149,44 +151,6 @@ export default async function (pi: ExtensionAPI) {
    * response from being counted twice.
    */
   let pendingHeaderTokens: { hit: number; miss: number } | null = null;
-
-  /* ------------------------------------------------------------------ */
-  /*  Init-time detection — read pi's defaultModel from settings          */
-  /* ------------------------------------------------------------------ */
-
-  try {
-    const { readFileSync } = await import("node:fs");
-    const { homedir } = await import("node:os");
-    const { join } = await import("node:path");
-    const envDir =
-      process.env.PI_CONFIG_DIR ?? process.env.XDG_CONFIG_HOME ?? "";
-    const settingsPaths = [
-      // PI_CONFIG_DIR overrides the default location
-      envDir ? join(envDir, "settings.json") : "",
-      // Standard pi locations
-      join(homedir(), ".pi", "agent", "settings.json"),
-      join(homedir(), ".config", "pi", "agent", "settings.json"),
-      join(homedir(), ".pi", "settings.json"),
-      join(process.cwd(), ".pi", "settings.json"),
-    ].filter(Boolean);
-
-    for (const sp of settingsPaths) {
-      try {
-        const data = JSON.parse(readFileSync(sp, "utf-8"));
-        const defaultModel =
-          (data as Record<string, unknown>).defaultModel as string ?? "";
-        if (defaultModel && isDeepSeekModelId(defaultModel)) {
-          isDeepSeekSession = true;
-          currentModel = defaultModel;
-          break;
-        }
-      } catch {
-        continue;
-      }
-    }
-  } catch {
-    // Can't read settings — will detect on first API call instead.
-  }
 
   /* ------------------------------------------------------------------ */
   /*  model_select — detect DeepSeek when user switches models           */
@@ -197,23 +161,7 @@ export default async function (pi: ExtensionAPI) {
   (pi.on as (...args: unknown[]) => void)(
     "model_select",
     (event: Record<string, unknown>) => {
-      const modelObj = event?.model;
-      let modelId = "";
-      if (typeof modelObj === "string") {
-        modelId = modelObj;
-      } else if (modelObj && typeof modelObj === "object") {
-        modelId =
-          (modelObj as Record<string, unknown>).id as string ??
-          (modelObj as Record<string, unknown>).name as string ??
-          "";
-      }
-      if (modelId && isDeepSeekModelId(modelId)) {
-        isDeepSeekSession = true;
-        currentModel = modelId;
-      } else if (modelId) {
-        isDeepSeekSession = false;
-        currentModel = modelId;
-      }
+      updateModel(event?.model);
     },
   );
 
@@ -223,18 +171,19 @@ export default async function (pi: ExtensionAPI) {
 
   pi.on(
     "before_provider_request",
-    (event: BeforeProviderRequestEvent) => {
+    (event: BeforeProviderRequestEvent, ctx: ExtensionContext) => {
       const payload = event.payload as
         | { model?: string; messages?: unknown[]; tools?: unknown[] }
         | undefined;
       if (!payload) return;
 
-      // Detect DeepSeek by model ID (fallback for first API call)
-      if (payload.model && isDeepSeekModelId(payload.model)) {
-        if (!isDeepSeekSession) {
-          isDeepSeekSession = true;
-          currentModel = payload.model;
-        }
+      // Pi's resolved model covers CLI overrides, resumed sessions, and aliases.
+      // Keep the payload fallback for callers without a live context; refresh it
+      // in both directions so switching away cannot leave the hooks active.
+      if (ctx?.model) {
+        updateModel(ctx.model);
+      } else if (payload.model && payload.model !== currentModel) {
+        updateModel(payload.model);
       }
       if (!isDeepSeekSession) return;
 
@@ -318,7 +267,7 @@ export default async function (pi: ExtensionAPI) {
       if (REASONIX_CONFIG.metrics && isDeepSeekSession && msg.role === "assistant") {
         const usage = msg.usage as Record<string, unknown> | undefined;
         if (usage) {
-          // OpenCode format: usage.cacheRead, usage.cacheWrite
+          // Pi normalizes usage.input to the uncached portion already.
           // DeepSeek format: usage.prompt_cache_hit_tokens, ...
           const cacheRead =
             (usage.cacheRead as number) ??
@@ -328,15 +277,14 @@ export default async function (pi: ExtensionAPI) {
             (usage.cacheWrite as number) ??
             (usage.prompt_cache_write_tokens as number) ??
             0;
-          const totalInput =
-            (usage.input as number) ?? (usage.prompt_tokens as number) ?? 0;
+          const missTokens =
+            (usage.input as number) ??
+            (usage.prompt_cache_miss_tokens as number) ??
+            Math.max(0, ((usage.prompt_tokens as number) ?? 0) - cacheRead - cacheWrite);
 
           if (cacheRead > 0) stats.cacheHitTokens += cacheRead;
           if (cacheWrite > 0) stats.cacheWriteTokens += cacheWrite;
-          if (totalInput > 0) {
-            const missTokens = Math.max(0, totalInput - cacheRead);
-            stats.cacheMissTokens += missTokens;
-          }
+          if (missTokens > 0) stats.cacheMissTokens += missTokens;
           // Usage is authoritative for this response; discard header stash.
           pendingHeaderTokens = null;
         } else if (pendingHeaderTokens) {
@@ -439,12 +387,11 @@ export default async function (pi: ExtensionAPI) {
   });
 
   /* ------------------------------------------------------------------ */
-  /*  session_start — reset per-session state (keep model detection)     */
+  /*  session_start — detect the active model and reset prefix state     */
   /* ------------------------------------------------------------------ */
 
-  pi.on("session_start", () => {
-    // Keep isDeepSeekSession/currentModel across sessions.
-    // session_start fires on new/forked sessions but doesn't change the model.
+  pi.on("session_start", (_event, ctx) => {
+    updateModel(ctx?.model);
     if (REASONIX_CONFIG.cache) {
       prefixGuard.reset();
       logTracker.reset();
@@ -460,6 +407,7 @@ export default async function (pi: ExtensionAPI) {
   pi.registerCommand("reasonix-status", {
     description: "Show pi-reasonix cache and repair stats",
     handler: async (_args: string, _ctx: ExtensionCommandContext) => {
+      updateModel(_ctx.model);
       const lines = [
         "╔══════════════════════════════════════════════╗",
         "║            pi-reasonix Status                ║",

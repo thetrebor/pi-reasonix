@@ -69,7 +69,8 @@ export class PrefixGuard {
     messages: DeepSeekChatMessage[],
     tools?: unknown[],
   ): { messages: DeepSeekChatMessage[]; prefixHash: string } {
-    const systemMsg = messages.find((m) => m.role === "system");
+    const systemIndex = messages.findIndex((m) => m.role === "system");
+    const systemMsg = messages[systemIndex];
     const systemText = systemMsg?.content ?? "";
 
     const systemHash = fastHash(systemText);
@@ -82,9 +83,9 @@ export class PrefixGuard {
     if (systemMsg) {
       stabilised.push(systemMsg);
     }
-    // Append non-system messages in stable order (no reordering).
-    const nonSystem = messages.filter((m) => m.role !== "system");
-    stabilised.push(...nonSystem);
+    // Only the first system message is lifted. Later system messages are
+    // instruction updates at specific conversation positions, not duplicates.
+    stabilised.push(...messages.filter((_message, index) => index !== systemIndex));
 
     this._stabiliseCount++;
     this._prevPrefixHash = this._prefixHash;

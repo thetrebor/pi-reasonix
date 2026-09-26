@@ -46,6 +46,23 @@ describe("PrefixGuard", () => {
     assert.equal(r1.prefixHash, r2.prefixHash);
   });
 
+  it("preserves later system updates at their conversation positions", async () => {
+    const { PrefixGuard } = await import("../dist/src/cache-first.js");
+    const guard = new PrefixGuard();
+    const initial = { role: "system", content: "Initial instructions" };
+    const messages = [
+      initial,
+      { role: "user", content: "First request" },
+      { role: "system", content: "Updated project instructions" },
+      { role: "assistant", content: "Acknowledged" },
+      initial, // Even a repeated object is a separate transcript entry.
+      { role: "user", content: "Second request" },
+    ];
+    const result = guard.stabilise(messages);
+    assert.deepEqual(result.messages, messages);
+    assert.equal(messages.length, 6, "input must not be mutated");
+  });
+
   it("stays stable as tool CALLS grow — tool definitions unchanged (regression)", async () => {
     // Regression: the old implementation hashed assistant tool_calls, which
     // grow every turn — making the prefix hash change on every turn even when

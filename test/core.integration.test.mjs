@@ -65,11 +65,22 @@ function createMockAPI() {
   };
 }
 
-async function loadExtension() {
+async function loadExtension(model = { id: "deepseek-v4-flash", provider: "deepseek" }) {
   const { api, captured } = createMockAPI();
   const ext = (await import("../dist/extensions/index.js")).default;
   await ext(api);
+  // Do not depend on the developer's personal settings.json to activate hooks.
+  api._handlers.get("model_select")({ model: model ?? { id: "fixture-inactive", provider: "fixture" } });
   return { api, captured };
+}
+
+async function readStatus(api, model) {
+  let rendered = "";
+  await api._handlers.get("cmd:reasonix-status")("", {
+    model,
+    ui: { notify: (text) => { rendered = text; } },
+  });
+  return rendered;
 }
 
 /* ------------------------------------------------------------------ */
@@ -338,18 +349,39 @@ describe("cache metric dedupe", () => {
     responseHandler({ status: 200, headers: { "x-cache-hit-tokens": "50000", "x-cache-miss-tokens": "1000" } });
     messageHandler({ message: {
       role: "assistant",
-      usage: { cacheRead: 50000, input: 51000 },
+      usage: { cacheRead: 50000, cacheWrite: 0, input: 1000 },
     } });
 
     // Then a turn with NO usage at all: headers applied as fallback.
     responseHandler({ status: 200, headers: { "x-cache-hit-tokens": "10000", "x-cache-miss-tokens": "200" } });
     messageHandler({ message: { role: "assistant", content: [] } });
 
-    // Sanity: the fallback path did not throw and the second message_end
-    // consumed the pending header stash. (Counters are internal; the
-    // important observable is that no exception path corrupted state.)
-    assert.equal(typeof api._handlers.size, "number");
+    api._handlers.get("turn_end")({});
+    const status = await readStatus(api);
+    assert(status.includes(`Hit tokens:  ${(60000).toLocaleString()}`));
+    assert(status.includes(`Miss tokens: ${(1200).toLocaleString()}`));
+    assert.match(status, /Hit ratio:\s+98\.0%/);
   });
+});
+
+describe("Pi and raw DeepSeek cache accounting", () => {
+  const cases = [
+    ["Pi normalized usage", { input: 400, cacheRead: 600, cacheWrite: 0 }, 400, "60.0%"],
+    ["fully cached Pi input", { input: 0, cacheRead: 600, cacheWrite: 0, prompt_tokens: 600 }, 0, "100.0%"],
+    ["Pi cache writes", { input: 300, cacheRead: 600, cacheWrite: 100 }, 300, "60.0%"],
+    ["uncached Pi input", { input: 1000, cacheRead: 0, cacheWrite: 0 }, 1000, "0.0%"],
+    ["raw DeepSeek counters", { prompt_cache_hit_tokens: 600, prompt_cache_miss_tokens: 400 }, 400, "60.0%"],
+    ["raw prompt-total fallback", { prompt_tokens: 1000, prompt_cache_hit_tokens: 600 }, 400, "60.0%"],
+  ];
+  for (const [name, usage, misses, ratio] of cases) {
+    it(name, async () => {
+      const { api } = await loadExtension();
+      api._handlers.get("message_end")({ message: { role: "assistant", content: [], usage } });
+      const status = await readStatus(api);
+      assert(status.includes(`Miss tokens: ${misses.toLocaleString()}`), status);
+      assert(status.includes(`Hit ratio:    ${ratio}`), status);
+    });
+  }
 });
 
 /* ------------------------------------------------------------------ */
@@ -394,6 +426,56 @@ describe("DeepSeek model detection", () => {
     assert.equal(isDeepSeekProvider("https://api.deepseek.com/v1"), true);
     assert.equal(isDeepSeekProvider("https://api.openai.com/v1"), false);
     assert.equal(isDeepSeekProvider("http://localhost:11434"), false);
+  });
+
+  it("activates from the live startup model without a model_select event", async () => {
+    const { api } = await loadExtension(null);
+    const model = { id: "deepseek-flash", provider: "deepseek" };
+    api._handlers.get("session_start")({}, { model });
+    assert.match(await readStatus(api), /Active:\s+✅ Yes \(deepseek-flash\)/);
+  });
+
+  for (const model of [
+    { id: "deepseek-flash", provider: "deepseek" },
+    { id: "custom-alias", provider: "DeepSeek" },
+    { id: "deepseek/deepseek-v4-pro", provider: "openrouter" },
+  ]) {
+    it(`recognizes ${model.provider}/${model.id}`, async () => {
+      const { api } = await loadExtension(model);
+      const payload = { model: model.id, messages: [msg({ content: "hello" })] };
+      const result = api._handlers.get("before_provider_request")({ payload }, { model });
+      assert.ok(result, "DeepSeek hook should be active");
+      assert.match(await readStatus(api), /Active:\s+✅ Yes/);
+    });
+  }
+
+  it("uses the live request model instead of stale selection state", async () => {
+    const { api } = await loadExtension();
+    const model = { id: "mimo-v2.6-pro", provider: "xiaomi" };
+    const payload = { model: model.id, messages: [msg({ content: "hello" })] };
+    const result = api._handlers.get("before_provider_request")({ payload }, { model });
+    assert.equal(result, undefined);
+    assert.match(await readStatus(api), /Active:\s+⏸️/);
+  });
+
+  it("refreshes status from the live context before a request", async () => {
+    const { api } = await loadExtension();
+    assert.match(await readStatus(api, { id: "mimo-v2.6-pro", provider: "xiaomi" }), /Active:\s+⏸️/);
+  });
+
+  it("detects and deactivates from payloads when live context is unavailable", async () => {
+    const { api } = await loadExtension(null);
+    const handler = api._handlers.get("before_provider_request");
+    const messages = [msg({ content: "hello" })];
+    assert.ok(handler({ payload: { model: "deepseek-flash", messages } }));
+    assert.equal(handler({ payload: { model: "mimo-v2.6-pro", messages } }), undefined);
+  });
+
+  it("leaves unrelated models inactive", async () => {
+    const { api } = await loadExtension({ id: "kimi-k3", provider: "moonshot" });
+    assert.equal(api._handlers.get("before_provider_request")({
+      payload: { model: "kimi-k3", messages: [msg({ content: "hello" })] },
+    }), undefined);
   });
 });
 

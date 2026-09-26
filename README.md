@@ -106,22 +106,24 @@ This is a standard Pi extension using Pi's event system. No modifications to Pi 
 | `after_provider_response` | Header-based cache metric extraction (OpenRouter-style) | Stashes `x-cache-hit-tokens` headers (applied only if no usage arrives — no double counting) |
 | `message_end` | **Body-based cache metric extraction** + **tool-call repair** | Reads `usage.cacheRead` from AgentMessage (preferred over headers); repairs truncated args, suppresses call-storms, and (opt-in) scavenges leaked calls |
 | `turn_end` | Applies stashed header tokens if no usage arrived | Also reserved for per-turn cost logging |
-| `session_start` | Resets prefix state for new conversations | Keeps model detection across sessions |
+| `session_start` | Detects Pi's active model and resets prefix state | Handles startup and resumed sessions |
 | `/reasonix-status` (TUI command) | Displays live cache and repair statistics | Registered via `pi.registerCommand()` |
 
 ### Model detection priority
 
-1. **Init-time** — reads Pi's `defaultModel` from settings.json
+1. **Live context** — uses Pi's resolved model on `session_start`, before each provider request, and when displaying status
 2. **User model switch** — catches `/model` commands via `model_select` event
-3. **First API call** — fallback detection from `before_provider_request` payload
+3. **Payload fallback** — detects the request model ID when live context is unavailable, including switches away from DeepSeek
 
-This three-layer detection ensures the extension activates before any API call, even on first startup.
+Detection accepts DeepSeek model IDs/names, including `deepseek-flash` and namespaced IDs, or a DeepSeek provider with a custom model alias. It does not read settings files independently, so CLI overrides and resumed sessions use the actual selected model.
+
+Prefix stabilization retains later system messages in the conversation; these can carry instruction updates and must not be discarded.
 
 ### Cache metric extraction
 
 The extension is tolerant of both metric sources and never double counts:
 
-- **OpenCode Go/Zen** — wraps usage data in AgentMessage metadata with `usage.cacheRead`, `usage.cacheWrite`, `usage.input` fields (preferred)
+- **Pi-normalized usage** — `usage.input` already contains uncached tokens; `usage.cacheRead` and `usage.cacheWrite` are separate. The cache-hit denominator includes all three, without subtracting cache reads twice.
 - **DeepSeek direct** — returns `usage.prompt_cache_hit_tokens`, `usage.prompt_cache_miss_tokens` in the response body (preferred)
 - **OpenRouter / header-based** — falls back to `after_provider_response` headers (`x-cache-hit-tokens`, `x-cache-miss-tokens`); headers are stashed at response time and only applied when no usage fields arrive
 
@@ -258,7 +260,7 @@ npm install
 # Compile TypeScript → dist/
 npm run build
 
-# Run test suite (21 tests: unit + integration; builds dist/ first)
+# Run all unit and integration test files (builds dist/ first)
 npm test
 ```
 
@@ -302,7 +304,7 @@ pi-reasonix is a **structural translation** of Reasonix's core algorithms into P
 - The cost-control logic in `src/cost-control.ts` adapts Reasonix's compaction thresholds to Pi's tool-result streaming
 - Pi-specific event wiring (`extensions/index.ts`) replaces Reasonix's internal provider hooks
 
-All 27 tests in the test suite validate that the translated algorithms preserve Reasonix's original behavior and correctness.
+The test suite covers the translated algorithms and Pi integration regressions, including model detection, cache accounting, and system-message preservation.
 
 ### Why not just use Reasonix directly?
 
