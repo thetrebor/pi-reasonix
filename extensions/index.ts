@@ -43,12 +43,12 @@ import type { ReasonixStats, DeepSeekChatMessage } from "../src/types.js";
  * Auto-append tool calls scavenged from reasoning content.
  * Off by default: scavenging mutates the tool-call list, so it is opt-in
  * until it has been validated on a real DeepSeek session.
+ *
+ * Read per-request via REASONIX_CONFIG.scavenge — see readReasonixConfig().
  */
-const SCAVENGE_ENABLED =
-  (process.env.REASONIX_SCAVENGE ?? "0") === "1";
 
 /* ------------------------------------------------------------------ */
-/*  Configuration (env vars, mirroring PI_HARNESS_* convention)         */
+/*  Configuration                                                      */
 /* ------------------------------------------------------------------ */
 
 function envBool(name: string, def: boolean): boolean {
@@ -57,22 +57,59 @@ function envBool(name: string, def: boolean): boolean {
   return !["0", "false", "no", "off", ""].includes(raw.toLowerCase());
 }
 
-const REASONIX_CONFIG = {
-  /** Master switch. When false, no hooks fire. */
-  enabled: envBool("PI_REASONIX_ENABLED", true),
-  /** Pillar 1 — cache prefix stabilization (system-first reorder + hash tracking). */
-  cache: envBool("PI_REASONIX_CACHE", true),
-  /** Pillar 3 — tool-result compaction + context tracking. */
-  cost: envBool("PI_REASONIX_COST", true),
-  /** Cache metric extraction (after_provider_response + message_end). */
-  metrics: envBool("PI_REASONIX_METRICS", true),
-};
+interface ReasonixConfig {
+  enabled: boolean;
+  cache: boolean;
+  cost: boolean;
+  metrics: boolean;
+  scavenge: boolean;
+}
+
+/**
+ * Read config from the environment.
+ *
+ * IMPORTANT: this is called from inside the extension factory AND again at
+ * session_start; the session_start read is the authoritative one. Never hoist
+ * these reads to module scope.
+ *
+ * Module scope is wrong because it is evaluated when the module is imported,
+ * which happens BEFORE other extensions' factories run, so a settings-declared
+ * env source such as pi-env cannot set these variables in time.
+ *
+ * Factory scope is also insufficient on its own: pi loads extensions in order,
+ * so when pi-reasonix is declared before pi-env in `packages`, the factory read
+ * still sees the shell default rather than the settings value. Only the
+ * session_start read happens after every factory has run.
+ *
+ * Verified: with the module- or factory-level form,
+ * `env: {"PI_REASONIX_ENABLED": "false"}` was ignored whenever pi-reasonix was
+ * declared before pi-env, and honoured when declared after. Reading at
+ * session_start is order-independent.
+ *
+ * Defaults are chosen so the shipped default is ON for every pillar, matching
+ * prior behaviour; operators turn pillars off explicitly.
+ */
+function readReasonixConfig(): ReasonixConfig {
+  return {
+    /** Master switch. When false, no hooks fire. */
+    enabled: envBool("PI_REASONIX_ENABLED", true),
+    /** Pillar 1 -- cache prefix stabilization (system-first reorder + hash tracking). */
+    cache: envBool("PI_REASONIX_CACHE", true),
+    /** Pillar 3 -- tool-result compaction + context tracking. */
+    cost: envBool("PI_REASONIX_COST", true),
+    /** Cache metric extraction (after_provider_response + message_end). */
+    metrics: envBool("PI_REASONIX_METRICS", true),
+    /** Pillar 2 -- scavenge tool calls out of reasoning content. */
+    scavenge: envBool("REASONIX_SCAVENGE", false),
+  };
+}
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                             */
 /* ------------------------------------------------------------------ */
 
 const DEEPSEEK_MODEL_PATTERNS = [
+  "deepseek-flash",
   "deepseek-chat",
   "deepseek-reasoner",
   "deepseek-v4",
@@ -110,12 +147,15 @@ function toolCallKey(
 /* ------------------------------------------------------------------ */
 
 export default async function (pi: ExtensionAPI) {
-  if (!REASONIX_CONFIG.enabled) {
-    console.log("[pi-reasonix] Disabled (PI_REASONIX_ENABLED=0).");
-    return;
-  }
+  // Read at factory time as a first pass, but the AUTHORITATIVE read happens in
+  // session_start -- see the note there. Factory time is still too early when
+  // another declared package is the env source (verified: with pi-reasonix
+  // declared before pi-env in `packages`, this read still saw the shell
+  // default rather than the settings-declared value).
+  let REASONIX_CONFIG = readReasonixConfig();
+
   console.log(
-    `[pi-reasonix] Loaded. cache=${REASONIX_CONFIG.cache ? "on" : "off"} cost=${REASONIX_CONFIG.cost ? "on" : "off"} metrics=${REASONIX_CONFIG.metrics ? "on" : "off"}`,
+    `[pi-reasonix] Registered. cache=${REASONIX_CONFIG.cache ? "on" : "off"} cost=${REASONIX_CONFIG.cost ? "on" : "off"} metrics=${REASONIX_CONFIG.metrics ? "on" : "off"} scavenge=${REASONIX_CONFIG.scavenge ? "on" : "off"}`,
   );
 
   /* ------------------------------------------------------------------ */
@@ -224,6 +264,7 @@ export default async function (pi: ExtensionAPI) {
   pi.on(
     "before_provider_request",
     (event: BeforeProviderRequestEvent) => {
+      if (!REASONIX_CONFIG.enabled) return;
       const payload = event.payload as
         | { model?: string; messages?: unknown[]; tools?: unknown[] }
         | undefined;
@@ -287,7 +328,7 @@ export default async function (pi: ExtensionAPI) {
   pi.on(
     "after_provider_response",
     (event: { status: number; headers: Record<string, string> }) => {
-      if (!isDeepSeekSession || !REASONIX_CONFIG.metrics) return;
+      if (!REASONIX_CONFIG.enabled || !isDeepSeekSession || !REASONIX_CONFIG.metrics) return;
       const headers = event.headers ?? {};
       const hit =
         headers["x-cache-hit-tokens"] ?? headers["prompt_cache_hit_tokens"];
@@ -311,6 +352,7 @@ export default async function (pi: ExtensionAPI) {
   (pi.on as (...args: unknown[]) => void)(
     "message_end",
     (event: Record<string, unknown>) => {
+      if (!REASONIX_CONFIG.enabled) return;
       const msg = event?.message as Record<string, unknown> | undefined;
       if (!msg) return;
 
@@ -370,7 +412,7 @@ export default async function (pi: ExtensionAPI) {
 
         // Pass 2 — scavenge tool calls leaked into reasoning content.
         // Opt-in (REASONIX_SCAVENGE=1): appending calls mutates the batch.
-        if (SCAVENGE_ENABLED) {
+        if (REASONIX_CONFIG.scavenge) {
           const reasoning =
             (msg.reasoning as string | null | undefined) ??
             (msg.reasoning_content as string | null | undefined) ??
@@ -443,9 +485,28 @@ export default async function (pi: ExtensionAPI) {
   /* ------------------------------------------------------------------ */
 
   pi.on("session_start", () => {
+    // AUTHORITATIVE config read. This fires after EVERY declared extension's
+    // factory has run, so an env source such as pi-env (which sets process.env
+    // from settings' "env" block) has already applied its values regardless of
+    // the order the two packages appear in `packages`.
+    //
+    // This is the fix for the order-dependence bug: reading in the factory was
+    // still too early -- when pi-reasonix was declared BEFORE pi-env, the
+    // factory saw the shell default and loaded anyway. Reading here is
+    // order-independent.
+    REASONIX_CONFIG = readReasonixConfig();
+
+    if (!REASONIX_CONFIG.enabled) {
+      console.log("[pi-reasonix] Disabled (PI_REASONIX_ENABLED=0).");
+    } else {
+      console.log(
+        `[pi-reasonix] Active. cache=${REASONIX_CONFIG.cache ? "on" : "off"} cost=${REASONIX_CONFIG.cost ? "on" : "off"} metrics=${REASONIX_CONFIG.metrics ? "on" : "off"} scavenge=${REASONIX_CONFIG.scavenge ? "on" : "off"}`,
+      );
+    }
+
     // Keep isDeepSeekSession/currentModel across sessions.
     // session_start fires on new/forked sessions but doesn't change the model.
-    if (REASONIX_CONFIG.cache) {
+    if (REASONIX_CONFIG.enabled && REASONIX_CONFIG.cache) {
       prefixGuard.reset();
       logTracker.reset();
       prefixHash = "";
@@ -491,7 +552,7 @@ export default async function (pi: ExtensionAPI) {
         "  💰 Cost Control",
         `    Results compacted: ${stats.resultsCompacted}`,
         `    Cap (tokens):      ${process.env.REASONIX_RESULT_CAP_TOKENS ?? "3000 (default)"}`,
-        `    Scavenge:          ${SCAVENGE_ENABLED ? "on" : "off (REASONIX_SCAVENGE=1 to enable)"}`,
+        `    Scavenge:          ${REASONIX_CONFIG.scavenge ? "on" : "off (REASONIX_SCAVENGE=1 to enable)"}`,
         "",
         `  🔄 Turns:  ${stats.totalTurns}`,
         `  📦 Tokens: ~${(stats.totalTokens / 1000).toFixed(1)}K total`,

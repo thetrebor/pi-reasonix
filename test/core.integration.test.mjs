@@ -230,7 +230,7 @@ describe("before_provider_request payload transformation", () => {
     assert(handler, "before_provider_request not registered");
 
     const payload = {
-      model: "deepseek-v4-flash",
+      model: "deepseek-flash",
       messages: [
         { role: "system", content: "you are helpful" },
         { role: "user", content: "hi" },

@@ -125,12 +125,42 @@ The extension is tolerant of both metric sources and never double counts:
 - **DeepSeek direct** — returns `usage.prompt_cache_hit_tokens`, `usage.prompt_cache_miss_tokens` in the response body (preferred)
 - **OpenRouter / header-based** — falls back to `after_provider_response` headers (`x-cache-hit-tokens`, `x-cache-miss-tokens`); headers are stashed at response time and only applied when no usage fields arrive
 
-### Environment variables
+### Configuration
+
+All settings are read from the environment, and are applied **at session start** — not at
+module import. That means a settings-declared env source such as
+[`pi-env`](https://www.npmjs.com/package/pi-env) can configure this extension, and the
+result does **not** depend on the order the two packages appear in `packages`.
+
+```json
+// .pi/settings.json  (project) or ~/.pi/agent/settings.json (global)
+{
+  "packages": ["npm:pi-env", "npm:pi-reasonix"],
+  "env": {
+    "PI_REASONIX_METRICS": "false",
+    "REASONIX_SCAVENGE": "1"
+  }
+}
+```
 
 | Variable | Default | Effect |
 |---|---|---|
-| `REASONIX_RESULT_CAP_TOKENS` | `3000` | Token cap per tool result before head+tail compaction |
-| `REASONIX_SCAVENGE` | `0` | Set to `1` to auto-append tool calls scavenged from `<think>`/reasoning content |
+| `PI_REASONIX_ENABLED` | `true` | Master switch. `0`/`false`/`no`/`off` disables every hook. |
+| `PI_REASONIX_CACHE` | `true` | Pillar 1 — cache prefix stabilization (system-first reorder + hash tracking). |
+| `PI_REASONIX_COST` | `true` | Pillar 3 — tool-result compaction and context tracking. |
+| `PI_REASONIX_METRICS` | `true` | Cache metric extraction and `/reasonix-status` counters. |
+| `REASONIX_SCAVENGE` | `0` | Set to `1` to auto-append tool calls scavenged from `<think>`/reasoning content. |
+| `REASONIX_RESULT_CAP_TOKENS` | `3000` | Token cap per tool result before head+tail compaction. |
+
+Boolean vars accept `1`/`true`/`yes`/`on` and reject `0`/`false`/`no`/`off`.
+
+> **Note on the `PI_REASONIX_*` prefix.** `PI_REASONIX_*` names follow the `PI_HARNESS_*`
+> convention used by `pi-deepseek-optimized`. `REASONIX_SCAVENGE` and
+> `REASONIX_RESULT_CAP_TOKENS` predate that convention and are kept as-is for
+> compatibility. Set the names exactly as written above.
+
+**Never use `workspace-write`-style shell exports for these** if you want them portable —
+declare them in a settings `env` block so they travel with the project.
 
 ---
 
