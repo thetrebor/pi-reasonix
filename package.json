@@ -29,15 +29,14 @@
     "build": "tsc",
     "prepublishOnly": "npm run build && npm run test",
     "test": "npm run build && node --experimental-vm-modules test/*.test.mjs",
-    "check": "npm run build && npm run test",
-    "postinstall": "npm run build || true"
+    "check": "npm run build && npm run test"
   },
   "publishConfig": {
     "access": "public"
   },
   "pi": {
     "extensions": [
-      "./dist/extensions"
+      "./extensions"
     ]
   },
   "peerDependencies": {
@@ -48,7 +47,7 @@
     "typescript": "^5.7.0"
   },
   "files": [
-    "dist/",
+    "extensions/",
     "src/",
     "README.md",
     "LICENSE"
