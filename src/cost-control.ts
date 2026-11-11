@@ -32,7 +32,15 @@ export const PROACTIVE_THRESHOLD = 0.4;
  * Rough estimate of token count from string length.
  * DeepSeek models use ~4 chars/token for English text.
  */
-export function estimateTokens(text: string): number {
+export function estimateTokens(text: unknown): number {
+  // Guard: content can be an array/object (images, structured tool output).
+  if (typeof text !== "string") {
+    try {
+      text = JSON.stringify(text) ?? "";
+    } catch {
+      text = "";
+    }
+  }
   return Math.ceil(text.length / 4);
 }
 
@@ -74,7 +82,8 @@ export function compactToolResult(
   capTokens = RESULT_CAP_TOKENS,
 ): DeepSeekChatMessage {
   if (message.role !== "tool") return message;
-  if (!message.content) return message;
+  // Non-string content (image/blob tool results) is skipped, not sliced.
+  if (typeof message.content !== "string" || !message.content) return message;
 
   const estimatedTokens = estimateTokens(message.content);
   if (estimatedTokens <= capTokens) return message;
@@ -151,7 +160,8 @@ export function checkContextPressure(
 export function summarizeToolResult(
   message: DeepSeekChatMessage,
 ): string {
-  if (message.role !== "tool" || !message.content) return "";
+  if (message.role !== "tool" || typeof message.content !== "string" || !message.content)
+    return "";
   const estimatedTokens = estimateTokens(message.content);
 
   // Extract first meaningful line for a summary prefix
