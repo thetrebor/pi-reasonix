@@ -11,8 +11,8 @@
  * 2. Context-window pressure detection
  */
 
-import { fastHash } from "./cache-first.js";
-import type { DeepSeekChatMessage } from "./types.js";
+import { contentToText } from "./cache-first.js";
+import type { DeepSeekChatMessage, MessageContent } from "./types.js";
 
 /**
  * Default token cap per tool result after compaction.
@@ -31,9 +31,15 @@ export const PROACTIVE_THRESHOLD = 0.4;
 /**
  * Rough estimate of token count from string length.
  * DeepSeek models use ~4 chars/token for English text.
+ *
+ * Accepts `unknown` and flattens content blocks first: after a `cache_control`
+ * marker is stamped, `content` is `[{ type: "text", text, cache_control }]`
+ * and `content.length` is the number of *blocks* (often 1), not characters —
+ * which used to under-report a 40 KB system prompt as 1 token.
  */
-export function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
+export function estimateTokens(text: unknown): number {
+  const flat = typeof text === "string" ? text : contentToText(text as MessageContent);
+  return Math.ceil(flat.length / 4);
 }
 
 /**
@@ -76,10 +82,11 @@ export function compactToolResult(
   if (message.role !== "tool") return message;
   if (!message.content) return message;
 
-  const estimatedTokens = estimateTokens(message.content);
+  const text = contentToText(message.content);
+  const estimatedTokens = estimateTokens(text);
   if (estimatedTokens <= capTokens) return message;
 
-  const truncated = truncateKeepEnds(message.content, capTokens);
+  const truncated = truncateKeepEnds(text, capTokens);
 
   return {
     ...message,
@@ -152,10 +159,11 @@ export function summarizeToolResult(
   message: DeepSeekChatMessage,
 ): string {
   if (message.role !== "tool" || !message.content) return "";
-  const estimatedTokens = estimateTokens(message.content);
+  const text = contentToText(message.content);
+  const estimatedTokens = estimateTokens(text);
 
   // Extract first meaningful line for a summary prefix
-  const firstLine = message.content.split("\n").find(
+  const firstLine = text.split("\n").find(
     (l) => l.trim().length > 0,
   );
   const summary = firstLine

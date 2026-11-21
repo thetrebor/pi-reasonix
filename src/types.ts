@@ -4,6 +4,28 @@
  * Harvested from reasonix: esengine/DeepSeek-Reasonix
  */
 
+/** One block of an array-shaped message `content`. */
+export interface MessageContentBlock {
+  type?: string;
+  text?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * A message `content` in a provider payload is not always a plain string.
+ *
+ * OpenAI-shaped requests start with `content: "…"`, but the value becomes an
+ * array of content blocks as soon as anything adds `cache_control` markers
+ * (pi's own `applyAnthropicCacheControl` when a model sets
+ * `compat.cacheControlFormat: "anthropic"`, or a caching extension such as
+ * pi-opencode-go-cache), or when the message carries images.
+ */
+export type MessageContent =
+  | string
+  | null
+  | undefined
+  | ReadonlyArray<MessageContentBlock | null | undefined>;
+
 /** A serialisable tool call the model emitted. */
 export interface ToolCallRepairInput {
   id: string;
@@ -27,7 +49,11 @@ export interface RepairReport {
 /** DeepSeek-specific chat message with optional reasoning_content. */
 export interface DeepSeekChatMessage {
   role: "system" | "user" | "assistant" | "tool";
-  content: string | null;
+  /**
+   * Plain string in OpenAI-shaped payloads, an array of content blocks once
+   * `cache_control` markers or images are involved. Never assume string.
+   */
+  content: MessageContent;
   tool_calls?: ToolCallRepairInput[];
   tool_call_id?: string;
   reasoning_content?: string | null;
@@ -58,4 +84,6 @@ export interface ReasonixStats {
   /** Session-level roll-ups. */
   totalTurns: number;
   totalTokens: number;
+  /** Hook invocations that threw and were swallowed (payload shape surprises). */
+  hookErrors: number;
 }

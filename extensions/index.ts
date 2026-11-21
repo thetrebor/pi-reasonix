@@ -130,6 +130,20 @@ function getHitRatio(
   return ((stats.cacheHitTokens / total) * 100).toFixed(1) + "%";
 }
 
+/**
+ * Best-effort model id from anything pi hands us: a bare string, or a model
+ * object (`{ id, name }`, `{ provider, id }`, ...).
+ */
+function modelIdOf(model: unknown): string {
+  if (typeof model === "string") return model;
+  if (model && typeof model === "object") {
+    const obj = model as Record<string, unknown>;
+    const id = obj.id ?? obj.name ?? obj.modelId;
+    if (typeof id === "string") return id;
+  }
+  return "";
+}
+
 /** Extract a deterministic key for a toolCall block (name + serialized args). */
 function toolCallKey(
   name: string | undefined,
@@ -176,6 +190,7 @@ export default async function (pi: ExtensionAPI) {
     conversationTruncations: 0,
     totalTurns: 0,
     totalTokens: 0,
+    hookErrors: 0,
   };
 
   let isDeepSeekSession = false;
@@ -237,16 +252,7 @@ export default async function (pi: ExtensionAPI) {
   (pi.on as (...args: unknown[]) => void)(
     "model_select",
     (event: Record<string, unknown>) => {
-      const modelObj = event?.model;
-      let modelId = "";
-      if (typeof modelObj === "string") {
-        modelId = modelObj;
-      } else if (modelObj && typeof modelObj === "object") {
-        modelId =
-          (modelObj as Record<string, unknown>).id as string ??
-          (modelObj as Record<string, unknown>).name as string ??
-          "";
-      }
+      const modelId = modelIdOf(event?.model);
       if (modelId && isDeepSeekModelId(modelId)) {
         isDeepSeekSession = true;
         currentModel = modelId;
@@ -265,59 +271,75 @@ export default async function (pi: ExtensionAPI) {
     "before_provider_request",
     (event: BeforeProviderRequestEvent) => {
       if (!REASONIX_CONFIG.enabled) return;
-      const payload = event.payload as
-        | { model?: string; messages?: unknown[]; tools?: unknown[] }
-        | undefined;
-      if (!payload) return;
+      // Never let a payload-shape surprise break the LLM call: a caching
+      // extension that runs before this one (or pi's own compat pass) can hand
+      // us content blocks instead of strings. Worst case we skip the
+      // optimisation for this turn and the request goes out untouched.
+      try {
+        const payload = event.payload as
+          | { model?: string; messages?: unknown[]; tools?: unknown[] }
+          | undefined;
+        if (!payload) return;
 
-      // Detect DeepSeek by model ID (fallback for first API call)
-      if (payload.model && isDeepSeekModelId(payload.model)) {
-        if (!isDeepSeekSession) {
-          isDeepSeekSession = true;
-          currentModel = payload.model;
+        // Detect DeepSeek by model ID (fallback for first API call)
+        if (payload.model && isDeepSeekModelId(payload.model)) {
+          if (!isDeepSeekSession) {
+            isDeepSeekSession = true;
+            currentModel = payload.model;
+          }
         }
-      }
-      if (!isDeepSeekSession) return;
+        if (!isDeepSeekSession) return;
 
-      const messages = payload.messages as DeepSeekChatMessage[] | undefined;
-      if (!messages || messages.length === 0) return;
+        const messages = payload.messages as DeepSeekChatMessage[] | undefined;
+        if (!messages || messages.length === 0) return;
 
-      let working = messages;
+        let working = messages;
 
-      // 1. Stabilise the prefix: system first, and hash the cache head
-      //    (system message + tool *definitions*), not the growing history.
-      if (REASONIX_CONFIG.cache) {
-        const stabilised = prefixGuard.stabilise(
-          working,
-          payload.tools as unknown[] | undefined,
-        );
-        prefixHash = stabilised.prefixHash;
-        working = stabilised.messages;
+        // 1. Stabilise the prefix: system first, and hash the cache head
+        //    (system message + tool *definitions*), not the growing history.
+        if (REASONIX_CONFIG.cache) {
+          const stabilised = prefixGuard.stabilise(
+            working,
+            payload.tools as unknown[] | undefined,
+          );
+          prefixHash = stabilised.prefixHash;
+          working = stabilised.messages;
 
-        // 2. Check append-only invariant (truncation doesn't affect prefix hash)
-        if (!logTracker.validate(working as DeepSeekChatMessage[])) {
-          // Pi truncated older messages to fit the context window. The cache
-          // head (system + tools) survives; the truncated conversation bulk is
-          // a cache miss on the next request — counted for the status display.
-          logTracker.reset();
-          stats.conversationTruncations++;
+          // 2. Check append-only invariant (truncation doesn't affect prefix hash)
+          if (!logTracker.validate(working as DeepSeekChatMessage[])) {
+            // Pi truncated older messages to fit the context window. The cache
+            // head (system + tools) survives; the truncated conversation bulk is
+            // a cache miss on the next request — counted for the status display.
+            logTracker.reset();
+            stats.conversationTruncations++;
+          }
         }
+
+        // 3. Compact oversized tool results (head+tail preserving)
+        if (REASONIX_CONFIG.cost) {
+          const compacted = compactToolResults(working as DeepSeekChatMessage[]);
+          stats.resultsCompacted += compacted.compactedCount;
+          working = compacted.compacted;
+        }
+
+        // 4. Track context metrics
+        const ctxTokens = estimateContextUsage(working as DeepSeekChatMessage[]);
+        stats.totalTokens = ctxTokens;
+        stats.totalTurns++;
+
+        // 5. Return modified payload
+        return { ...payload, messages: working };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        stats.hookErrors++;
+        if (stats.hookErrors === 1 || stats.hookErrors % 50 === 0) {
+          console.error(
+            `[pi-reasonix] before_provider_request hook failed ` +
+              `(${stats.hookErrors}x): ${message}`,
+          );
+        }
+        return;
       }
-
-      // 3. Compact oversized tool results (head+tail preserving)
-      if (REASONIX_CONFIG.cost) {
-        const compacted = compactToolResults(working as DeepSeekChatMessage[]);
-        stats.resultsCompacted += compacted.compactedCount;
-        working = compacted.compacted;
-      }
-
-      // 4. Track context metrics
-      const ctxTokens = estimateContextUsage(working as DeepSeekChatMessage[]);
-      stats.totalTokens = ctxTokens;
-      stats.totalTurns++;
-
-      // 5. Return modified payload
-      return { ...payload, messages: working };
     },
   );
 
@@ -351,7 +373,7 @@ export default async function (pi: ExtensionAPI) {
 
   (pi.on as (...args: unknown[]) => void)(
     "message_end",
-    (event: Record<string, unknown>) => {
+    (event: Record<string, unknown>, ctx?: Record<string, unknown>) => {
       if (!REASONIX_CONFIG.enabled) return;
       const msg = event?.message as Record<string, unknown> | undefined;
       if (!msg) return;
@@ -390,6 +412,18 @@ export default async function (pi: ExtensionAPI) {
       }
 
       /* ---- tool-call repair (only assistant tool-call messages) ---- */
+      // Repair only for DeepSeek traffic: the pipeline is tuned to DeepSeek's
+      // failure modes and it mutates the tool-call batch, so it must never run
+      // for other providers. Prefer the model of the *current turn* from the
+      // handler context (authoritative) and keep the session flag as fallback
+      // for pi versions that do not pass `ctx.model`.
+      const ctxModelId = modelIdOf(ctx?.model);
+      if (ctxModelId) {
+        const ctxIsDeepSeek = isDeepSeekModelId(ctxModelId);
+        isDeepSeekSession = ctxIsDeepSeek;
+        currentModel = ctxModelId;
+        if (!ctxIsDeepSeek) return;
+      }
       if (!isDeepSeekSession || msg.role !== "assistant") return;
       const content = msg.content;
       if (!Array.isArray(content)) return;

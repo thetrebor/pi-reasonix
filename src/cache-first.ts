@@ -16,17 +16,61 @@
  * append-only order so the prefix stays byte-stable across turns.
  */
 
-import type { DeepSeekChatMessage, PrefixHash } from "./types.js";
+import type { DeepSeekChatMessage, MessageContent } from "./types.js";
+
+/**
+ * Flatten any message `content` shape into plain text.
+ *
+ * Text blocks are concatenated in order; non-text blocks (images, tool parts)
+ * contribute a stable placeholder so the hash still changes when they change.
+ */
+export function contentToText(content: MessageContent): string {
+  if (typeof content === "string") return content;
+  if (content === null || content === undefined) return "";
+  if (Array.isArray(content)) {
+    let out = "";
+    for (const block of content) {
+      if (block === null || block === undefined) continue;
+      if (typeof block.text === "string") out += block.text;
+      else if (typeof block.type === "string") out += `\u0000${block.type}`;
+    }
+    return out;
+  }
+  // Unknown shape: fall back to a serialised form rather than throwing.
+  try {
+    return JSON.stringify(content) ?? "";
+  } catch {
+    return String(content);
+  }
+}
 
 /**
  * Compute a stable hash for a value using a fast non-crypto algorithm.
  * DeepSeek's cache is byte-prefix based, so we just need a deterministic
  * fingerprint to detect changes.
+ *
+ * Accepts `unknown` on purpose: provider payloads reach the extension layering
+ * after other extensions and after pi's own compat pass have reshaped them, so
+ * a non-string here must degrade gracefully, never throw.
  */
-export function fastHash(value: string): string {
+export function fastHash(value: unknown): string {
+  const text =
+    typeof value === "string"
+      ? value
+      : Array.isArray(value)
+        ? contentToText(value as MessageContent)
+        : typeof value === "number" || typeof value === "boolean"
+          ? String(value)
+          : (() => {
+              try {
+                return JSON.stringify(value) ?? "";
+              } catch {
+                return "";
+              }
+            })();
   let h = 0;
-  for (let i = 0; i < value.length; i++) {
-    h = ((h << 5) - h + value.charCodeAt(i)) | 0;
+  for (let i = 0; i < text.length; i++) {
+    h = ((h << 5) - h + text.charCodeAt(i)) | 0;
   }
   return (h >>> 0).toString(36);
 }
@@ -69,22 +113,27 @@ export class PrefixGuard {
     messages: DeepSeekChatMessage[],
     tools?: unknown[],
   ): { messages: DeepSeekChatMessage[]; prefixHash: string } {
-    const systemMsg = messages.find((m) => m.role === "system");
-    const systemText = systemMsg?.content ?? "";
+    const systemMsgs = messages.filter((m) => m.role === "system");
+    // The cache head is *all* system content, in order: pi emits additional
+    // system messages when it updates its instructions mid-conversation
+    // (renderSystemMessageUpdate).
+    const systemText = systemMsgs
+      .map((m) => contentToText(m.content as MessageContent))
+      .join("\u0000");
 
     const systemHash = fastHash(systemText);
     // Hash the *tool definitions* (stable), not tool calls (append-only).
     const toolsHash = fastHash(JSON.stringify(tools ?? []));
     const prefixHash = fastHash(systemHash + "|" + toolsHash);
 
-    // Always re-emit system first if it exists.
-    const stabilised: DeepSeekChatMessage[] = [];
-    if (systemMsg) {
-      stabilised.push(systemMsg);
-    }
-    // Append non-system messages in stable order (no reordering).
-    const nonSystem = messages.filter((m) => m.role !== "system");
-    stabilised.push(...nonSystem);
+    // Re-emit system first — but never drop a system message. With more than
+    // one, keep the original order untouched: the earlier versions filtered
+    // every `role === "system"` message and silently deleted all but the
+    // first, which discarded pi's mid-conversation instruction updates.
+    const hasSingleSystem = systemMsgs.length <= 1;
+    const stabilised: DeepSeekChatMessage[] = hasSingleSystem
+      ? [...systemMsgs, ...messages.filter((m) => m.role !== "system")]
+      : [...messages];
 
     this._stabiliseCount++;
     this._prevPrefixHash = this._prefixHash;

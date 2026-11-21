@@ -42,9 +42,61 @@ export function flattenParamName(path: string[]): string {
   return path.join(".");
 }
 
+/** Closing token for each container opener. */
+const OPEN_TO_CLOSE = { "{": "}", "[": "]" } as const;
+
+/**
+ * State of a (possibly truncated) JSON document, from a real character scan.
+ *
+ * Raw brace *counting* is not enough: `{"a": "x}` has one `{` and one `}`, so a
+ * counter-based check calls it balanced even though the document ends inside a
+ * string literal.
+ */
+interface JsonScan {
+  /** The document ends inside a string literal. */
+  inString: boolean;
+  /** The trailing character of the string is an unpaired backslash. */
+  danglingEscape: boolean;
+  /** Open containers, outermost first. */
+  stack: Array<"{" | "[">;
+}
+
+function scanJSON(text: string): JsonScan {
+  const stack: Array<"{" | "["> = [];
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === "{" || ch === "[") {
+      stack.push(ch);
+    } else if (ch === "}" || ch === "]") {
+      stack.pop();
+    }
+  }
+
+  return { inString, danglingEscape: inString && escaped, stack };
+}
+
 /**
  * Estimate whether tool-call arguments JSON is truncated.
- * Checks by attempting to parse and looking for unbalanced braces/brackets.
+ *
+ * True when the document does not parse AND either a string literal or a
+ * container is still open at the end.
  */
 export function isTruncatedJSON(text: string): boolean {
   if (!text) return false;
@@ -52,17 +104,65 @@ export function isTruncatedJSON(text: string): boolean {
     JSON.parse(text);
     return false; // Parsed fine
   } catch {
-    // If it ends without closing all braces/brackets, it's truncated.
-    const openBraces = (text.match(/\{/g) || []).length;
-    const closeBraces = (text.match(/\}/g) || []).length;
-    const openBrackets = (text.match(/\[/g) || []).length;
-    const closeBrackets = (text.match(/\]/g) || []).length;
-    return openBraces > closeBraces || openBrackets > closeBrackets;
+    const scan = scanJSON(text);
+    return scan.inString || scan.stack.length > 0;
   }
 }
 
+/** Remove a string-literal key at the end of `text` (`{"a"` -> `{`). */
+function dropTrailingKey(text: string): string {
+  if (!text.endsWith('"')) return text;
+
+  // Walk back to the opening quote of the trailing literal.
+  let i = text.length - 2;
+  while (i >= 0) {
+    if (text[i] === '"') {
+      let backslashes = 0;
+      let j = i - 1;
+      while (j >= 0 && text[j] === "\\") {
+        backslashes++;
+        j--;
+      }
+      if (backslashes % 2 === 0) break; // Not escaped: this is the opener.
+    }
+    i--;
+  }
+  if (i < 0) return text;
+
+  return text.slice(0, i).trimEnd();
+}
+
 /**
- * Attempt to repair truncated JSON by closing open braces/brackets.
+ * Drop an incomplete trailing member: `{"a": 1,` -> `{"a": 1`,
+ * `{"a":` -> `{}`, `{"a": 1, "b":` -> `{"a": 1}`.
+ *
+ * Without this, appending closers turns `{"a":` into `{"a":}`, which is still
+ * invalid JSON, so the whole repair used to be a no-op.
+ */
+function dropDanglingMember(text: string): string {
+  let out = text.trimEnd();
+
+  // Bounded loop: every branch strictly shortens `out`.
+  for (let guard = 0; guard < 8; guard++) {
+    if (out.endsWith(",")) {
+      out = out.slice(0, -1).trimEnd();
+      continue;
+    }
+    if (out.endsWith(":")) {
+      out = dropTrailingKey(out.slice(0, -1).trimEnd());
+      continue;
+    }
+    break;
+  }
+
+  return out;
+}
+
+/**
+ * Attempt to repair truncated JSON by closing the open string and containers.
+ *
+ * Handles the DeepSeek max_tokens cut, which almost always lands *mid-string*
+ * (`{"path": "/Users/me/repo/sr`) rather than neatly between tokens.
  */
 export function repairTruncatedJSON(text: string): {
   repaired: string;
@@ -73,20 +173,28 @@ export function repairTruncatedJSON(text: string): {
   }
 
   let result = text;
-  const openBraces = (result.match(/\{/g) || []).length;
-  const closeBraces = (result.match(/\}/g) || []).length;
-  const openBrackets = (result.match(/\[/g) || []).length;
-  const closeBrackets = (result.match(/\]/g) || []).length;
 
-  // Close brackets first (innermost), then braces (outermost)
-  for (let i = 0; i < openBrackets - closeBrackets; i++) {
-    result += "]";
-  }
-  for (let i = 0; i < openBraces - closeBraces; i++) {
-    result += "}";
+  // 1. Close an unterminated string literal. Appending closers first would
+  //    place them inside the string and leave the document invalid.
+  let scan = scanJSON(result);
+  if (scan.inString) {
+    result += scan.danglingEscape ? '\\"' : '"';
+    scan = scanJSON(result);
   }
 
-  // Remove trailing commas that would invalidate JSON
+  // 2. Drop an incomplete trailing member, which would otherwise become
+  //    `{"a": }` once the closers are appended.
+  result = dropDanglingMember(result);
+
+  // 3. Close the containers that are still open, innermost first, using the
+  //    closer that matches each opener. The previous version emitted every
+  //    `]` before every `}`, so `{"a":[{"b":1` became `{"a":[{"b":1]}}`.
+  scan = scanJSON(result);
+  for (let i = scan.stack.length - 1; i >= 0; i--) {
+    result += OPEN_TO_CLOSE[scan.stack[i]];
+  }
+
+  // 4. Trailing commas left behind by the cut.
   result = result.replace(/,\s*([}\]])/g, "$1");
 
   try {
