@@ -212,6 +212,48 @@ describe("repairTruncatedJSON", () => {
     const parsed = JSON.parse(result.repaired);
     assert.deepEqual(parsed.items, [1, 2, 3]);
   });
+
+  // Regression: the cut from max_tokens almost always lands *inside* a string
+  // literal, so appending only closers produced `{"path": "a.txt"}` — still
+  // invalid — and the whole repair was a silent no-op.
+  it("closes an unterminated string literal (regression)", async () => {
+    const { repairTruncatedJSON } = await import("../dist/src/repair.js");
+    const result = repairTruncatedJSON('{"path": "a.txt');
+    assert.equal(result.fixed, true);
+    assert.deepEqual(JSON.parse(result.repaired), { path: "a.txt" });
+  });
+
+  it("closes containers innermost first, matching opener type (regression)", async () => {
+    const { repairTruncatedJSON } = await import("../dist/src/repair.js");
+    // Previous implementation emitted every `]` before every `}` and produced
+    // `{"a":[{"b":1]}}`, which never parsed.
+    const result = repairTruncatedJSON('{"a":[{"b":1');
+    assert.equal(result.fixed, true);
+    assert.deepEqual(JSON.parse(result.repaired), { a: [{ b: 1 }] });
+  });
+
+  it("drops an incomplete trailing member (regression)", async () => {
+    const { repairTruncatedJSON } = await import("../dist/src/repair.js");
+
+    const keyOnly = repairTruncatedJSON('{"a":');
+    assert.equal(keyOnly.fixed, true);
+    assert.deepEqual(JSON.parse(keyOnly.repaired), {});
+
+    const comma = repairTruncatedJSON('{"a": 1,');
+    assert.equal(comma.fixed, true);
+    assert.deepEqual(JSON.parse(comma.repaired), { a: 1 });
+
+    const trailingKey = repairTruncatedJSON('{"a": 1, "b":');
+    assert.equal(trailingKey.fixed, true);
+    assert.deepEqual(JSON.parse(trailingKey.repaired), { a: 1 });
+  });
+
+  it("keeps a dangling backslash inside the closed string", async () => {
+    const { repairTruncatedJSON } = await import("../dist/src/repair.js");
+    const result = repairTruncatedJSON('{"p": "C:\\');
+    assert.equal(result.fixed, true);
+    assert.equal(JSON.parse(result.repaired).p, "C:\\");
+  });
 });
 
 describe("scavengeToolCalls", () => {
@@ -251,6 +293,13 @@ describe("isTruncatedJSON", () => {
   it("detects truncated JSON", async () => {
     const { isTruncatedJSON } = await import("../dist/src/repair.js");
     assert.equal(isTruncatedJSON('{"a": 1, "b": {"c"'), true);
+  });
+
+  // Regression: brace *counting* saw one `{` and one `}` here and called the
+  // document balanced, even though it ends inside a string literal.
+  it("detects a cut inside a string that still has balanced braces", async () => {
+    const { isTruncatedJSON } = await import("../dist/src/repair.js");
+    assert.equal(isTruncatedJSON('{"a": "x}'), true);
   });
 });
 

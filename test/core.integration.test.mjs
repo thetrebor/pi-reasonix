@@ -254,6 +254,12 @@ describe("before_provider_request payload transformation", () => {
 /* ------------------------------------------------------------------ */
 
 describe("message_end tool-call repair", () => {
+  // The repair pass is DeepSeek-only (it mutates the tool-call batch), and the
+  // handler resolves the model from its context. Pass one explicitly: relying
+  // on the session flag seeded from ~/.pi/agent/settings.json made these tests
+  // pass or fail depending on the developer's default model.
+  const DEEPSEEK_CTX = { model: { provider: "opencode-go", id: "deepseek-v4.1-flash" } };
+
   it("repairs truncated string arguments in place", async () => {
     const { api } = await loadExtension();
     const handler = api._handlers.get("message_end");
@@ -267,7 +273,7 @@ describe("message_end tool-call repair", () => {
       ],
     };
 
-    handler({ message });
+    handler({ message }, DEEPSEEK_CTX);
 
     const repaired = message.content.find((c) => c.type === "toolCall");
     assert.equal(repaired.arguments, '{"path": "a.txt"}', "truncated args not repaired");
@@ -285,7 +291,7 @@ describe("message_end tool-call repair", () => {
       ],
     };
 
-    handler({ message });
+    handler({ message }, DEEPSEEK_CTX);
 
     assert.deepEqual(message.content[0].arguments, { path: "a.txt" });
   });
@@ -304,11 +310,29 @@ describe("message_end tool-call repair", () => {
       ],
     };
 
-    handler({ message });
+    handler({ message }, DEEPSEEK_CTX);
 
     const calls = message.content.filter((c) => c.type === "toolCall");
     assert.equal(calls.length, 2, `expected 2 calls, got ${calls.length}`);
     assert.deepEqual(calls.map((c) => c.id).sort(), ["1", "4"]);
+  });
+
+  it("does not touch tool calls from a non-DeepSeek model", async () => {
+    const { api } = await loadExtension();
+    const handler = api._handlers.get("message_end");
+
+    const message = {
+      role: "assistant",
+      content: [
+        { type: "toolCall", id: "1", name: "read", arguments: '{"path": "a.txt' },
+        { type: "toolCall", id: "2", name: "read", arguments: '{"path": "a.txt' },
+      ],
+    };
+
+    handler({ message }, { model: { provider: "opencode-go", id: "kimi-k3.1-pro" } });
+
+    assert.equal(message.content[0].arguments, '{"path": "a.txt', "repaired a non-DeepSeek call");
+    assert.equal(message.content.length, 2, "suppressed calls for a non-DeepSeek model");
   });
 
   it("does not repair non-assistant messages", async () => {
@@ -320,7 +344,7 @@ describe("message_end tool-call repair", () => {
       content: [{ type: "text", text: "result" }],
     };
 
-    assert.doesNotThrow(() => handler({ message }));
+    assert.doesNotThrow(() => handler({ message }, DEEPSEEK_CTX));
   });
 });
 
